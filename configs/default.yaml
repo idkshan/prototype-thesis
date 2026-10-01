@@ -1,0 +1,112 @@
+# Driver-monitoring detection model v1 - reference configuration.
+# These values equal the defaults in dms/config.py (a unit test checks this).
+# Copy this file, edit it, and pass it with:  --config configs/my_experiment.yaml
+# Only the keys you want to change need to appear in your copy.
+
+# ---------------------------------------------------------------- Stage 1: AI perception
+face:                                # MediaPipe Face Landmarker (detector + mesh + blendshape networks)
+  model_path: models/face_landmarker.task
+  min_detection_confidence: 0.5
+  min_presence_confidence: 0.5
+  min_tracking_confidence: 0.5
+
+detector:                            # YOLO phone detector: YOLOv8 / YOLO11 / YOLO26 are interchangeable here
+  model_path: models/yolov8n.pt      # paper baseline; swap to models/yolo11n.pt or models/yolo26n.pt to compare
+  imgsz: 640
+  conf: 0.35
+  iou: 0.5
+  device: cpu
+  every_n_frames: 1                  # run YOLO every N frames (reuse boxes in between) to save compute
+  phone_class_names: [cell phone, phone, mobile phone, cellphone, mobile_phone]
+  roi_width_factor: 2.5              # phone must be within +/-2.5 face-widths of the face centre ...
+  roi_above_factor: 0.5              # ... and not more than 0.5 face-heights above the face
+
+eye_model:                           # optional learned eye-state classifier (YOLO-cls on MRL Eye); null = off
+  model_path: null
+  closed_class_names: [closed, close, closed_eye, closed_eyes]
+  crop_scale: 1.8
+  grayscale: true
+  imgsz: null
+
+# ---------------------------------------------------------------- Stage 3: threshold classification
+evidence:                            # fusion weights (0 disables a source -> ablation studies)
+  eye_ear: 0.5                       # geometric Eye Aspect Ratio
+  eye_blendshape: 0.5                # learned eyeBlink blendshape
+  eye_cnn: 0.5                       # learned eye-state classifier (only if eye_model is set)
+  mouth_mar: 0.5                     # geometric Mouth Aspect Ratio
+  mouth_blendshape: 0.5              # learned jawOpen blendshape
+
+thresholds:                          # relative to the driver's calibrated baseline
+  ear_closed_ratio: 0.70             # closed when EAR < 0.70 x baseline EAR
+  blink_closed_delta: 0.35           # closed when eyeBlink > baseline + 0.35
+  mar_open_delta: 0.40               # wide open when MAR > baseline + 0.40
+  jaw_open_delta: 0.35               # wide open when jawOpen > baseline + 0.35
+  yaw_deg: 30.0                      # head turned away when |yaw - baseline| > 30 deg
+  pitch_down_deg: 20.0               # looking down when pitch < baseline - 20 deg
+  pitch_up_deg: 25.0
+  decision_level: 0.5                # fused evidence >= 0.5 -> state ON
+  uncalibrated_pose_scale: 1.5       # pose limits x1.5 while no baseline exists (conservative)
+
+calibration:
+  enabled: true
+  duration_s: 5.0
+  min_samples: 25
+  max_pose_std_deg: 5.0
+  min_ear: 0.18
+  max_mar: 0.25
+  max_blink: 0.5
+  adapt: true                        # online baseline tracking while the driver is confidently alert
+  adapt_tau_s: 120.0
+  adapt_quiet_s: 10.0
+  max_ear_drift: 0.20
+  max_mar_drift: 0.10
+  max_pose_drift_deg: 10.0
+  defaults: {ear: 0.28, mar: 0.05, yaw: 0.0, pitch: 0.0, blink: 0.15, jaw: 0.03}
+
+temporal:                            # persistence rules, in seconds (frame-rate independent)
+  closure_gap_s: 0.15
+  closure_event_s: 0.5               # shorter closures are ordinary blinks
+  yawn_min_s: 1.5                    # shorter mouth openings are speech
+  yawn_gap_s: 0.3
+  gaze_min_s: 2.0                    # shorter glances are mirror checks
+  gaze_gap_s: 0.3
+  phone_confirm_s: 3.0               # Section 1.7.15
+  phone_gap_s: 0.5
+  perclos_window_s: 60.0
+  perclos_min_coverage_s: 30.0                # PERCLOS needs half a window of data
+  offroad_window_s: 30.0
+  yawn_window_s: 300.0
+  closure_hold_s: 3.0
+  gaze_hold_s: 1.0
+  phone_hold_s: 1.0
+  face_loss_as_gaze_away: true
+  face_loss_max_s: 10.0
+
+# ---------------------------------------------------------------- Stage 4: severity anchors [[x, score], ...]
+severity:                            # 0.34 = MODERATE starts, 0.66 = SEVERE starts (fuzzy crossovers)
+  perclos:       [[0.0, 0.0], [0.04, 0.0], [0.08, 0.34], [0.15, 0.66], [0.25, 1.0]]
+  closure_s:     [[0.0, 0.0], [0.4, 0.0], [0.8, 0.34], [1.5, 0.66], [2.0, 0.9], [3.0, 1.0]]
+  yawn_count:    [[0.0, 0.0], [1.0, 0.4], [2.0, 0.5], [3.0, 0.7], [4.0, 0.9]]
+  gaze_s:        [[0.0, 0.0], [1.0, 0.0], [2.0, 0.34], [3.0, 0.66], [4.0, 0.9], [5.0, 1.0]]
+  offroad_ratio: [[0.0, 0.0], [0.1, 0.0], [0.25, 0.34], [0.4, 0.66], [0.6, 1.0]]
+  phone_s:       [[0.0, 0.0], [1.0, 0.0], [2.99, 0.3], [3.0, 0.7], [5.0, 1.0]]
+
+# ---------------------------------------------------------------- Stage 5: context, risk, alerts
+context:
+  speed_kmh:     [[0.0, 0.0], [5.0, 0.1], [10.0, 0.34], [20.0, 0.5], [60.0, 0.5], [80.0, 0.66], [100.0, 0.9], [120.0, 1.0]]
+  motion_g:      [[0.0, 0.0], [0.1, 0.0], [0.25, 0.34], [0.45, 0.66], [0.6, 1.0]]
+  driving_hours: [[0.0, 0.0], [1.0, 0.34], [2.0, 0.66], [3.0, 1.0]]
+  assumed_speed_kmh: 40.0            # used when GPS speed is missing (never suppresses alerts)
+
+risk:
+  tier_bounds: [25.0, 52.5, 77.5]    # R >= 25 LOW, >= 52.5 MEDIUM, >= 77.5 HIGH
+  resolution: 201
+
+alerts:
+  release_s: 3.0
+  min_interval_s: 5.0
+  medium_repeat_s: 2.0
+  medium_max_repeats: 5
+  high_repeat_s: 1.0
+  high_max_repeats: 0
+  push_interval_s: 60.0
