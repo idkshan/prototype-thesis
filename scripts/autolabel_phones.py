@@ -40,7 +40,7 @@ PHONE_ALIASES = {"cell phone", "phone", "mobile phone", "cellphone"}
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--src", required=True, help="folder containing class sub-folders c0..c9")
     ap.add_argument("--out", default="datasets/phone")
     ap.add_argument("--teacher", default="models/yolo11x.pt", help="large pretrained detector used as labeller")

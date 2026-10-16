@@ -29,7 +29,7 @@ def fetch(url: str, dest: Path) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--out", default="models")
     ap.add_argument("--sizes", nargs="+", default=["n"], help="YOLO sizes: n s m l x")
     ap.add_argument("--cls", action="store_true", help="also download -cls classification weights")

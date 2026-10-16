@@ -2,11 +2,14 @@
 
 This stage makes no decisions. It computes numbers from the AI outputs:
 EAR and MAR from landmark geometry, head pose from solvePnP, the learned
-blendshape scores, the optional eye-state probability, and the confidence of
-any YOLO phone detection located near the driver.
+blendshape scores, the optional eye-state probability, the confidence of any
+YOLO phone detection located near the driver, and - with a driver-state YOLO
+model - YOLO's eye-closed and yawn scores for boxes inside the driver's face.
 """
 
 from __future__ import annotations
+
+from typing import Iterable, Optional
 
 from ..config import ObjectDetectorConfig
 from ..types import FaceObservation, FrameFeatures, PerceptionResult
@@ -32,6 +35,30 @@ def phone_in_driver_roi(box, face: FaceObservation | None, frame_h: int, cfg: Ob
     return within_x and within_y
 
 
+def inside_face(box, face: FaceObservation, margin: float) -> bool:
+    """True if the centre of ``box`` lies inside the face box enlarged by ``margin``."""
+    fx1, fy1, fx2, fy2 = face.bbox
+    mx, my = (fx2 - fx1) * margin, (fy2 - fy1) * margin
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+    return fx1 - mx <= cx <= fx2 + mx and fy1 - my <= cy <= fy2 + my
+
+
+def two_class_score(positive: Optional[float], negative: Optional[float]) -> Optional[float]:
+    """Combine the best confidences of a positive and a negative class into 0..1.
+
+    0.5 means undecided. Only a positive detection -> (1 + p) / 2 >= 0.5;
+    only a negative detection -> (1 - n) / 2 < 0.5; both -> (1 + p - n) / 2.
+    """
+    if positive is None and negative is None:
+        return None
+    return (1.0 + (positive or 0.0) - (negative or 0.0)) / 2.0
+
+
+def _best(confs: Iterable[float]) -> Optional[float]:
+    confs = list(confs)
+    return max(confs) if confs else None
+
+
 class FeatureExtractor:
     def __init__(self, detector_cfg: ObjectDetectorConfig):
         self.detector_cfg = detector_cfg
@@ -51,6 +78,23 @@ class FeatureExtractor:
 
         if face is None:
             return FrameFeatures(t=t, face_present=False, phone_conf=phone_conf, phone_boxes=phone_boxes)
+
+        # YOLO driver-state detections inside the driver's face
+        parts = {"eye_open": [], "eye_closed": [], "yawn": [], "no_yawn": []}
+        for det in perception.detections:
+            if det.role in parts:
+                det.in_driver_roi = inside_face(det.box, face, self.detector_cfg.face_part_margin)
+                if det.in_driver_roi:
+                    parts[det.role].append(det.confidence)
+        roles = perception.detector_roles
+        eye_closed_yolo = None
+        if {"eye_open", "eye_closed"} & roles:
+            eye_closed_yolo = two_class_score(_best(parts["eye_closed"]), _best(parts["eye_open"]))
+        yawn_yolo = None
+        if "yawn" in roles:
+            yawn_yolo = two_class_score(_best(parts["yawn"]), _best(parts["no_yawn"]))
+            if yawn_yolo is None:
+                yawn_yolo = 0.0  # face visible and no yawning mouth detected
 
         pts = face.landmarks
         ear_r = eye_aspect_ratio(pts, RIGHT_EYE_EAR)
@@ -73,6 +117,8 @@ class FeatureExtractor:
             blink=blink,
             jaw_open=bs.get("jawOpen"),
             eye_closed_prob=perception.eye_closed_prob,
+            eye_closed_yolo=eye_closed_yolo,
+            yawn_yolo=yawn_yolo,
             phone_conf=phone_conf,
             phone_boxes=phone_boxes,
         )

@@ -1,0 +1,5 @@
+participant,session,labels,split,condition
+P01,P01_day,labels/P01_day.csv,validation,day
+P01,P01_night,labels/P01_night.csv,validation,night
+P02,P02_day,labels/P02_day.csv,test,day
+P02,P02_night,labels/P02_night.csv,test,night

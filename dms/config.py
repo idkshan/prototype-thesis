@@ -38,11 +38,15 @@ class FaceModelConfig:
 
 @dataclass
 class ObjectDetectorConfig:
-    """YOLO object detector used for mobile-phone detection.
+    """YOLO object detector: phones, and (with a driver-state model) eyes and yawns.
 
     Any Ultralytics detection model can be used (YOLOv8, YOLO11, YOLO26, or a
-    fine-tuned checkpoint). The default is the paper's baseline, YOLOv8-nano;
-    the default does not imply it is the best choice (see benchmark_yolo.py).
+    fine-tuned checkpoint). The default is the paper's baseline, YOLOv8-nano
+    pretrained on COCO, which only knows "cell phone". A driver-state model
+    trained with build_driver_state_dataset.py + train_yolo.py also detects
+    open eyes, closed eyes and yawning mouths; those detections become AI
+    evidence that the Stage-3 thresholds interpret. The default does not
+    imply it is the best choice (see benchmark_yolo.py).
     """
 
     model_path: str = "models/yolov8n.pt"
@@ -54,6 +58,12 @@ class ObjectDetectorConfig:
     phone_class_names: List[str] = field(
         default_factory=lambda: ["cell phone", "phone", "mobile phone", "cellphone", "mobile_phone"]
     )
+    # Driver-state classes (matched by name, case-insensitive)
+    eye_open_class_names: List[str] = field(default_factory=lambda: ["eye_open", "open_eye", "open", "eyes_open"])
+    eye_closed_class_names: List[str] = field(default_factory=lambda: ["eye_closed", "closed_eye", "closed", "eyes_closed"])
+    yawn_class_names: List[str] = field(default_factory=lambda: ["yawn", "yawning"])
+    no_yawn_class_names: List[str] = field(default_factory=lambda: ["no_yawn", "mouth_closed", "not_yawning"])
+    face_part_margin: float = 0.15  # eye / mouth boxes must lie inside the face box enlarged by 15 %
     # Spatial filter: a phone only counts if its centre lies near the driver,
     # i.e. within +/- roi_width_factor face-widths of the face centre and no
     # higher than roi_above_factor face-heights above the top of the face.
@@ -93,8 +103,10 @@ class EvidenceWeights:
     eye_ear: float = 0.5
     eye_blendshape: float = 0.5
     eye_cnn: float = 0.5
+    eye_yolo: float = 0.5  # YOLO driver-state detector (eye_open / eye_closed boxes)
     mouth_mar: float = 0.5
     mouth_blendshape: float = 0.5
+    mouth_yolo: float = 0.5  # YOLO driver-state detector (yawn boxes)
 
 
 @dataclass
@@ -165,6 +177,12 @@ class TemporalConfig:
     phone_hold_s: float = 1.0
     face_loss_as_gaze_away: bool = True  # face vanishing (head turned far away) counts as gaze away
     face_loss_max_s: float = 10.0  # after this the system reports "no face" instead
+    # Eye-state guards: eyes are not judged while the driver looks at a phone
+    # (lowered eyelids look closed), while the mouth is opening for a yawn
+    # (eyes squint) and for a short time after it closes again.
+    suspend_eyes_when_phone: bool = True
+    yawn_eye_guard_level: float = 0.3  # mouth evidence at/above this suspends eye judgement
+    yawn_eye_guard_s: float = 0.5
 
 
 # --------------------------------------------------------------------------
@@ -245,15 +263,19 @@ class Config:
 
 
 EYE_MODES = {
-    "fused": {"eye_ear": 0.5, "eye_blendshape": 0.5, "eye_cnn": 0.5},
-    "ear": {"eye_ear": 1.0, "eye_blendshape": 0.0, "eye_cnn": 0.0},
-    "blendshape": {"eye_ear": 0.0, "eye_blendshape": 1.0, "eye_cnn": 0.0},
-    "cnn": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 1.0},
+    "fused": {"eye_ear": 0.5, "eye_blendshape": 0.5, "eye_cnn": 0.5, "eye_yolo": 0.5},
+    "ear": {"eye_ear": 1.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.0},
+    "blendshape": {"eye_ear": 0.0, "eye_blendshape": 1.0, "eye_cnn": 0.0, "eye_yolo": 0.0},
+    "cnn": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 1.0, "eye_yolo": 0.0},
+    "yolo": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 1.0},
+    "ear+yolo": {"eye_ear": 0.5, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.5},
 }
 MOUTH_MODES = {
-    "fused": {"mouth_mar": 0.5, "mouth_blendshape": 0.5},
-    "mar": {"mouth_mar": 1.0, "mouth_blendshape": 0.0},
-    "blendshape": {"mouth_mar": 0.0, "mouth_blendshape": 1.0},
+    "fused": {"mouth_mar": 0.5, "mouth_blendshape": 0.5, "mouth_yolo": 0.5},
+    "mar": {"mouth_mar": 1.0, "mouth_blendshape": 0.0, "mouth_yolo": 0.0},
+    "blendshape": {"mouth_mar": 0.0, "mouth_blendshape": 1.0, "mouth_yolo": 0.0},
+    "yolo": {"mouth_mar": 0.0, "mouth_blendshape": 0.0, "mouth_yolo": 1.0},
+    "mar+yolo": {"mouth_mar": 0.5, "mouth_blendshape": 0.0, "mouth_yolo": 0.5},
 }
 
 

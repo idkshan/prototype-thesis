@@ -4,6 +4,15 @@ All three families share the Ultralytics API, so the model is chosen purely by
 the weights file (``yolov8n.pt``, ``yolo11n.pt``, ``yolo26n.pt`` or a
 fine-tuned checkpoint / exported ``.onnx``/``.tflite``/NCNN model). This keeps
 the comparison fair: everything except the network is identical.
+
+Each detected class is mapped to a *role* by name:
+  phone       -> phone-use channel
+  eye_open    -> eye-state evidence (open)
+  eye_closed  -> eye-state evidence (closed)
+  yawn        -> mouth evidence (yawning)
+  no_yawn     -> mouth evidence (not yawning, optional class)
+A COCO-pretrained model only produces "phone"; a driver-state model trained on
+the approved datasets produces all of them in one inference.
 """
 
 from __future__ import annotations
@@ -25,12 +34,22 @@ class ObjectDetector:
 
         self.cfg = cfg
         self.model = YOLO(cfg.model_path, task="detect")
-        self._phone_names = {n.lower() for n in cfg.phone_class_names}
+        self._roles = {}
+        for role, names in (
+            ("phone", cfg.phone_class_names),
+            ("eye_open", cfg.eye_open_class_names),
+            ("eye_closed", cfg.eye_closed_class_names),
+            ("yawn", cfg.yawn_class_names),
+            ("no_yawn", cfg.no_yawn_class_names),
+        ):
+            for n in names:
+                self._roles[n.lower()] = role
+        self.roles_available = {r for k, r in self._roles.items() if k in {str(v).lower() for v in self.model.names.values()}}
         self._frame = 0
         self._last: Tuple[List[Detection], Dict[str, float]] = ([], {})
 
     def role_of(self, label: str) -> str | None:
-        return "phone" if label.lower() in self._phone_names else None
+        return self._roles.get(label.lower())
 
     def detect(self, frame_bgr: np.ndarray) -> Tuple[List[Detection], Dict[str, float]]:
         """Return (detections, timings_ms). Runs every ``every_n_frames`` frames."""

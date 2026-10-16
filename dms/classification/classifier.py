@@ -1,7 +1,8 @@
 """Stage 3: threshold-based classification of the AI-derived visual features.
 
 This is the rule-based layer. It does not look at pixels; it *interprets*
-what the neural networks of Stage 1 measured:
+what the neural networks of Stage 1 measured (MediaPipe landmarks and
+blendshapes, the YOLO driver-state detections, the optional eye-state CNN):
 
 1. Per-frame states - fused evidence >= decision level (0.5) switches a state
    ON: eyes closed, mouth wide open, head turned away, phone visible.
@@ -34,6 +35,7 @@ class BehaviorClassifier:
         self.offroad = TimeWeightedRatio(tc.offroad_window_s)
         self.yawns = EventWindow(tc.yawn_window_s)
         self._last_face_t: Optional[float] = None
+        self._last_mouth_active_t = -math.inf
         self.last_event_t = -math.inf
 
     # ------------------------------------------------------ per-frame states
@@ -63,24 +65,35 @@ class BehaviorClassifier:
             )
             st.head_away = st.pose_evidence >= level
 
-        # Mouth: geometric MAR + learned jawOpen blendshape
-        mouth = {"mar": ramp_evidence(f.mar, b.mar, thr.mar_open), "blendshape": ramp_evidence(f.jaw_open, b.jaw, thr.jaw_open)}
+        # Mouth: geometric MAR + learned jawOpen blendshape + YOLO yawn detection
+        mouth = {
+            "mar": ramp_evidence(f.mar, b.mar, thr.mar_open),
+            "blendshape": ramp_evidence(f.jaw_open, b.jaw, thr.jaw_open),
+            "yolo": f.yawn_yolo,
+        }
         st.mouth_sources = {k: v for k, v in mouth.items() if v is not None}
-        st.mouth_evidence = fuse(mouth, {"mar": ev.mouth_mar, "blendshape": ev.mouth_blendshape})
+        st.mouth_evidence = fuse(mouth, {"mar": ev.mouth_mar, "blendshape": ev.mouth_blendshape, "yolo": ev.mouth_yolo})
         if st.mouth_evidence is not None:
             st.mouth_open = st.mouth_evidence >= level
+            if st.mouth_evidence >= tc.yawn_eye_guard_level:
+                self._last_mouth_active_t = f.t
 
-        # Eyes: geometric EAR + learned eyeBlink blendshape (+ optional eye-state CNN)
+        # Eyes: geometric EAR + learned eyeBlink blendshape + YOLO eye detection
+        # (+ optional eye-state CNN)
         eyes = {
             "ear": ramp_evidence(f.ear, b.ear, thr.ear_closed),
             "blendshape": ramp_evidence(f.blink, b.blink, thr.blink_closed),
             "cnn": f.eye_closed_prob,
+            "yolo": f.eye_closed_yolo,
         }
         st.eye_sources = {k: v for k, v in eyes.items() if v is not None}
-        st.eye_evidence = fuse(eyes, {"ear": ev.eye_ear, "blendshape": ev.eye_blendshape, "cnn": ev.eye_cnn})
+        st.eye_evidence = fuse(eyes, {"ear": ev.eye_ear, "blendshape": ev.eye_blendshape, "cnn": ev.eye_cnn, "yolo": ev.eye_yolo})
         # Eye state is not judged while the head is turned/lowered (EAR drops when
-        # looking down) or during a wide mouth opening (eyes squint when yawning).
-        if st.eye_evidence is not None and not st.head_away and not st.mouth_open:
+        # looking down), while a phone is in view (eyes look down at it), or while
+        # the mouth is opening for / just closed after a yawn (eyes squint).
+        yawn_guard = st.mouth_open or (f.t - self._last_mouth_active_t) <= tc.yawn_eye_guard_s
+        phone_guard = tc.suspend_eyes_when_phone and st.phone_visible
+        if st.eye_evidence is not None and not st.head_away and not yawn_guard and not phone_guard:
             st.eyes_closed = st.eye_evidence >= level
         return st
 

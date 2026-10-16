@@ -42,13 +42,14 @@ def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None) -> np.ndar
         x1, y1, x2, y2 = (int(v) for v in p.face.bbox)
         cv2.rectangle(img, (x1, y1), (x2, y2), (200, 200, 200), 1)
     if p is not None:
+        part_colors = {"phone": (0, 0, 255), "eye_closed": (0, 140, 255), "eye_open": (0, 200, 0), "yawn": (255, 0, 255), "no_yawn": (200, 200, 0)}
         for d in p.detections:
-            if d.role != "phone":
+            if d.role not in part_colors:
                 continue
-            color = (0, 0, 255) if d.in_driver_roi else (128, 128, 128)
+            color = part_colors[d.role] if d.in_driver_roi else (128, 128, 128)
             x1, y1, x2, y2 = (int(v) for v in d.box)
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-            _text(img, f"phone {d.confidence:.2f}", (x1, max(12, y1 - 4)), color)
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2 if d.role == "phone" else 1)
+            _text(img, f"{d.role} {d.confidence:.2f}", (x1, max(12, y1 - 4)), color, 0.4 if d.role != "phone" else 0.5)
 
     # Side panel
     panel_w = 300
@@ -88,7 +89,7 @@ def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None) -> np.ndar
         _bar(canvas, x, y - 9, 120, sev.score, LEVEL_COLORS[sev.level], f"{name} {sev.level}")
     y += 24
     _text(canvas, "Stage 5 fuzzy risk", (x, y), (200, 200, 200), 0.42)
-    for label, val in (("fatigue F", r.risk.fatigue), ("distraction D", r.risk.distraction), ("context C", r.risk.context)):
+    for label, val in ((f"fatigue F ({r.risk.fatigue_level})", r.risk.fatigue), ("distraction D", r.risk.distraction), ("context C", r.risk.context)):
         y += 16
         _bar(canvas, x, y - 9, 120, val, (255, 180, 0), f"{label} {val:.2f}")
     if b.no_face:

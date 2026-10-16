@@ -66,7 +66,9 @@ class DriverMonitor:
             t0 = time.perf_counter()
             eye_prob = self.eye_model.predict(frame, face)
             timings["eye_cnn_ms"] = (time.perf_counter() - t0) * 1000
-        return PerceptionResult(frame_size=(w, h), face=face, detections=dets, eye_closed_prob=eye_prob, timings_ms=timings)
+        roles = self.detector.roles_available if self.detector is not None else set()
+        return PerceptionResult(frame_size=(w, h), face=face, detections=dets, eye_closed_prob=eye_prob,
+                                timings_ms=timings, detector_roles=roles)
 
     def process(self, frame: np.ndarray, t: float, index: int = 0) -> FrameResult:
         start = time.perf_counter()

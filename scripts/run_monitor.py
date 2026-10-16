@@ -36,11 +36,12 @@ from dms.sources import open_source
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--source", default="0", help="camera index, video file, image folder, or http(s) URL")
     ap.add_argument("--config", default=None, help="YAML config (defaults: configs/default.yaml values)")
     ap.add_argument("--yolo", default=None, help="YOLO weights/export for phone detection (e.g. models/yolo11n.pt)")
     ap.add_argument("--imgsz", type=int, default=None, help="YOLO inference size (e.g. 320 for mobile-like speed)")
+    ap.add_argument("--conf", type=float, default=None, help="YOLO confidence threshold (default 0.35)")
     ap.add_argument("--yolo-every", type=int, default=None, help="run YOLO every N frames")
     ap.add_argument("--no-yolo", action="store_true", help="disable the phone detector")
     ap.add_argument("--eye-model", default=None, help="optional eye-state classifier (YOLO-cls weights)")
@@ -71,6 +72,8 @@ def main() -> int:
         overrides.setdefault("detector", {})["model_path"] = args.yolo
     if args.imgsz:
         overrides.setdefault("detector", {})["imgsz"] = args.imgsz
+    if args.conf is not None:
+        overrides.setdefault("detector", {})["conf"] = args.conf
     if args.yolo_every:
         overrides.setdefault("detector", {})["every_n_frames"] = args.yolo_every
     if args.eye_model:

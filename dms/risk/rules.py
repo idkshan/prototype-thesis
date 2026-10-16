@@ -2,7 +2,15 @@
 
 Hierarchical design: seven indicators feed three small blocks (Fatigue,
 Distraction, Context) whose outputs feed an Overall-Risk block. This needs
-27 + 9 + 9 + 27 = 72 rules instead of 3^7 = 2,187 for a flat rule base.
+27 + 9 + 9 + 36 = 81 rules instead of 3^7 = 2,187 for a flat rule base.
+
+Fatigue F has four levels, which are reported as drowsiness levels:
+    Low      -> Alert
+    Moderate -> Level 1 (slightly drowsy)
+    High     -> Level 2 (moderately drowsy)
+    Severe   -> Level 3 (severely drowsy)
+Signs that occur together are worse than either alone: drowsiness and yawning
+together raise the level by one, and so does a long drive.
 
 Each rule base is generated from a short, stated principle so that it is
 complete (every combination has exactly one rule) and easy to audit. Use
@@ -17,6 +25,13 @@ from typing import Dict, List
 from .fuzzy import FuzzySet, FuzzyVariable, Rule
 
 LEVELS = ("Low", "Moderate", "High")
+FATIGUE_LEVELS = ("Low", "Moderate", "High", "Severe")
+DROWSINESS_LEVEL_NAMES = {
+    "Low": "Alert",
+    "Moderate": "Level 1 (slightly drowsy)",
+    "High": "Level 2 (moderately drowsy)",
+    "Severe": "Level 3 (severely drowsy)",
+}
 RISK_LEVELS = ("NONE", "LOW", "MEDIUM", "HIGH")  # = alarm tiers of SO5
 
 # Table 1.7: Low peaks at 0 and fades by 0.4; Moderate rises from 0.3, peaks
@@ -25,6 +40,14 @@ UNIT_SETS = {
     "Low": [(0.0, 1.0), (0.4, 0.0)],
     "Moderate": [(0.3, 0.0), (0.5, 1.0), (0.7, 0.0)],
     "High": [(0.6, 0.0), (0.8, 1.0)],
+}
+
+# Fatigue F on 0..1 with four sets (centroids ~0.10, 0.40, 0.65, 0.88).
+FATIGUE_SETS = {
+    "Low": [(0.0, 1.0), (0.3, 0.0)],
+    "Moderate": [(0.2, 0.0), (0.4, 1.0), (0.6, 0.0)],
+    "High": [(0.45, 0.0), (0.65, 1.0), (0.85, 0.0)],
+    "Severe": [(0.7, 0.0), (0.9, 1.0)],
 }
 
 # Overall risk R on 0..100. Set names match the alarm tiers of SO5:
@@ -42,20 +65,28 @@ def unit_variable(name: str) -> FuzzyVariable:
     return FuzzyVariable(name, 0.0, 1.0, {k: FuzzySet(k, v) for k, v in UNIT_SETS.items()})
 
 
+def fatigue_variable(name: str = "fatigue") -> FuzzyVariable:
+    return FuzzyVariable(name, 0.0, 1.0, {k: FuzzySet(k, v) for k, v in FATIGUE_SETS.items()})
+
+
 def risk_variable(name: str = "risk") -> FuzzyVariable:
     return FuzzyVariable(name, 0.0, 100.0, {k: FuzzySet(k, v) for k, v in RISK_SETS.items()})
 
 
 def fatigue_rules() -> List[Rule]:
-    """F = stronger of the two visual fatigue cues (eye closure, yawning).
-    A long driving duration escalates Moderate fatigue to High; duration
-    alone never raises fatigue."""
+    """F starts at the stronger of the two visual fatigue cues (eye closure,
+    yawning). It rises one level when BOTH cues are present (at least
+    Moderate each), and one more level after a long drive (duration High).
+    Duration alone never raises fatigue. Capped at Severe (Level 3)."""
     rules = []
     for e, y, d in product(range(3), repeat=3):
         level = max(e, y)
-        if level == 1 and d == 2:
-            level = 2
-        rules.append(Rule({"eye_closure": LEVELS[e], "yawning": LEVELS[y], "duration": LEVELS[d]}, LEVELS[level]))
+        if e >= 1 and y >= 1:
+            level += 1  # drowsy AND yawning together
+        if level >= 1 and d == 2:
+            level += 1  # long continuous drive
+        level = min(level, 3)
+        rules.append(Rule({"eye_closure": LEVELS[e], "yawning": LEVELS[y], "duration": LEVELS[d]}, FATIGUE_LEVELS[level]))
     return rules
 
 
@@ -84,11 +115,13 @@ def context_rules() -> List[Rule]:
 
 # Driver-state risk for normal driving context, indexed [fatigue][distraction].
 # Encodes Section 1.7.1: one yawn -> LOW; frequent yawning or drowsiness ->
-# MEDIUM; distraction -> HIGH. Fatigue and distraction together compound.
+# MEDIUM; distraction -> HIGH. Combined signs compound: drowsy + yawning
+# (fatigue Severe / Level 3) -> HIGH; fatigue + distraction -> higher.
 OVERALL_BASE = [
-    ["NONE", "MEDIUM", "HIGH"],  # fatigue Low
-    ["LOW", "MEDIUM", "HIGH"],  # fatigue Moderate
-    ["MEDIUM", "HIGH", "HIGH"],  # fatigue High
+    ["NONE", "MEDIUM", "HIGH"],  # fatigue Low (Alert)
+    ["LOW", "MEDIUM", "HIGH"],  # fatigue Moderate (Level 1)
+    ["MEDIUM", "HIGH", "HIGH"],  # fatigue High (Level 2)
+    ["HIGH", "HIGH", "HIGH"],  # fatigue Severe (Level 3)
 ]
 
 
@@ -98,7 +131,7 @@ def overall_rules() -> List[Rule]:
     Moderate context (normal driving)         -> unchanged;
     High context (erratic / sudden motion)    -> HIGH (Section 1.7.1)."""
     rules = []
-    for f, d, c in product(range(3), repeat=3):
+    for f, d, c in product(range(4), range(3), range(3)):
         base = RISK_LEVELS.index(OVERALL_BASE[f][d])
         if c == 2:
             out = 3
@@ -106,7 +139,7 @@ def overall_rules() -> List[Rule]:
             out = max(0, base - 1)
         else:
             out = base
-        rules.append(Rule({"fatigue": LEVELS[f], "distraction": LEVELS[d], "context": LEVELS[c]}, RISK_LEVELS[out]))
+        rules.append(Rule({"fatigue": FATIGUE_LEVELS[f], "distraction": LEVELS[d], "context": LEVELS[c]}, RISK_LEVELS[out]))
     return rules
 
 

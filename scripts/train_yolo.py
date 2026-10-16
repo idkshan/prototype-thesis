@@ -22,7 +22,7 @@ import _bootstrap  # noqa: F401
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--data", required=True, help="data.yaml (detect) or dataset folder (classify)")
     ap.add_argument("--models", nargs="+", required=True)
     ap.add_argument("--task", choices=["detect", "classify"], default="detect")

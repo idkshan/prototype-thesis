@@ -71,7 +71,7 @@ def _fmt(value, unit: str) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(allow_abbrev=False)
     ap.add_argument("--config", default=None)
     args = ap.parse_args()
     cfg = load_config(args.config)

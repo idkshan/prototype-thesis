@@ -1,0 +1,7 @@
+behavior,start_s,end_s
+yawning,63.2,68.9
+gaze_deviation,120.0,124.5
+phone_usage,300.1,309.8
+slightly_drowsy,900.0,960.0
+moderately_drowsy,1500.0,1560.0
+severely_drowsy,2100.0,2130.0

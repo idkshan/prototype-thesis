@@ -27,7 +27,7 @@ import _bootstrap  # noqa: F401
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--src", required=True, help="unzipped mrlEyes_2018_01 folder")
     ap.add_argument("--out", default="datasets/mrl_eye")
     ap.add_argument("--split", nargs=3, type=float, default=[0.7, 0.15, 0.15])

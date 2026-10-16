@@ -45,7 +45,7 @@ SCENARIOS = {
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--config", default=None)
     ap.add_argument("--scenario", default=None, choices=sorted(SCENARIOS))
     ap.add_argument("--plot", default=None, help="save a stage-by-stage timeline PNG of --scenario")

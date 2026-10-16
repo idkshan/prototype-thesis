@@ -1,4 +1,4 @@
-"""Compare YOLO models (YOLOv8 / YOLO11 / YOLO26) for mobile phone detection.
+"""Compare YOLO models (YOLOv8 / YOLO11 / YOLO26): phone detector or driver-state detector.
 
 Every model is measured under identical conditions:
   * size on disk (MB) of each exported format
@@ -7,8 +7,9 @@ Every model is measured under identical conditions:
   * latency per image = pre-processing + inference + post-processing (NMS),
     mean / median / p95 and the resulting FPS
   * accuracy on a labelled split (optional): precision, recall and F1 at the
-    deployment confidence threshold, AP@0.5, and image-level phone presence
-    P/R/F1 (the quantity the behaviour detector actually uses)
+    deployment confidence threshold and AP@0.5 - per class (eye_open,
+    eye_closed, yawn, phone) for a driver-state dataset, with their macro
+    average - plus image-level phone presence P/R/F1
 
 The script reports numbers only; it does not rank the models. Desktop CPU
 latency is a *proxy*: final mobile claims need on-device measurements
@@ -153,60 +154,87 @@ def prf(tp: int, fp: int, fn: int) -> Tuple[float, float, float]:
     return p, r, f
 
 
-def evaluate(model, images: List[Path], gt_classes: set, imgsz: int, conf: float, device: str,
-             pred_classes: Optional[set] = None, nms_iou: float = 0.5) -> dict:
-    """Detection metrics for the phone class. ``pred_classes`` overrides which model
-    class ids count as phones (default: matched by name)."""
-    phone_ids = pred_classes if pred_classes is not None else {k for k, v in model.names.items() if str(v).lower() in PHONE_ALIASES}
-    all_scores, all_tp = [], []
-    n_gt = 0
-    img_tp = img_fp = img_fn = 0
+ROLE_ALIASES = {
+    "phone": PHONE_ALIASES,
+    "eye_open": {"eye_open", "open_eye", "open", "eyes_open"},
+    "eye_closed": {"eye_closed", "closed_eye", "closed", "eyes_closed"},
+    "yawn": {"yawn", "yawning"},
+}
+
+
+def role_of(name) -> Optional[str]:
+    n = str(name).lower()
+    return next((r for r, names in ROLE_ALIASES.items() if n in names), None)
+
+
+def evaluate_classes(model, images: List[Path], targets: Dict[str, set], imgsz: int, conf: float, device: str,
+                     nms_iou: float = 0.5, pred_ids: Optional[Dict[str, set]] = None) -> dict:
+    """Per-class detection metrics. ``targets`` maps a role (phone, eye_open, ...) to the
+    dataset class ids of that role; model classes are matched to roles by name."""
+    if pred_ids is None:
+        pred_ids = {r: {k for k, v in model.names.items() if role_of(v) == r} for r in targets}
+    acc = {r: {"scores": [], "tp": [], "n_gt": 0, "img": [0, 0, 0]} for r in targets}
     for path in images:
         img = cv2.imread(str(path))
         if img is None:
             continue
         h, w = img.shape[:2]
-        gt = read_gt(path, w, h, gt_classes)
-        n_gt += len(gt)
         res = model.predict(img, imgsz=imgsz, conf=0.001, iou=nms_iou, device=device, verbose=False, max_det=300)[0]
         if res.boxes is not None and len(res.boxes):
-            keep = np.isin(res.boxes.cls.cpu().numpy().astype(int), list(phone_ids))
-            boxes = res.boxes.xyxy.cpu().numpy()[keep]
-            scores = res.boxes.conf.cpu().numpy()[keep]
+            cls = res.boxes.cls.cpu().numpy().astype(int)
+            xyxy, cf = res.boxes.xyxy.cpu().numpy(), res.boxes.conf.cpu().numpy()
         else:
-            boxes, scores = np.zeros((0, 4)), np.zeros(0)
-        tp = match(boxes, scores, gt)
-        all_scores.append(scores)
-        all_tp.append(tp)
-        detected = bool((scores >= conf).any())
-        img_tp += int(detected and len(gt) > 0)
-        img_fp += int(detected and len(gt) == 0)
-        img_fn += int(not detected and len(gt) > 0)
-    scores = np.concatenate(all_scores) if all_scores else np.zeros(0)
-    tp = np.concatenate(all_tp) if all_tp else np.zeros(0, dtype=bool)
-    sel = scores >= conf
-    p, r, f1 = prf(int(tp[sel].sum()), int((~tp[sel]).sum()), n_gt - int(tp[sel].sum()))
-    ip, ir, if1 = prf(img_tp, img_fp, img_fn)
-    # F1 across thresholds (informative only; choose the operating point on a validation split)
-    best_f1, best_conf = 0.0, conf
-    for c in np.linspace(0.05, 0.95, 19):
-        s = scores >= c
-        _, _, f = prf(int(tp[s].sum()), int((~tp[s]).sum()), n_gt - int(tp[s].sum()))
-        if f > best_f1:
-            best_f1, best_conf = f, float(c)
-    return {
-        "images": len(images),
-        "gt_boxes": n_gt,
-        "precision": round(p, 4),
-        "recall": round(r, 4),
-        "f1": round(f1, 4),
-        "ap50": round(average_precision(scores, tp, n_gt), 4),
-        "img_precision": round(ip, 4),
-        "img_recall": round(ir, 4),
-        "img_f1": round(if1, 4),
-        "best_f1": round(best_f1, 4),
-        "best_f1_conf": round(best_conf, 2),
-    }
+            cls, xyxy, cf = np.zeros(0, int), np.zeros((0, 4)), np.zeros(0)
+        for r, gt_ids in targets.items():
+            gt = read_gt(path, w, h, gt_ids)
+            keep = np.isin(cls, list(pred_ids[r]))
+            boxes, scores = xyxy[keep], cf[keep]
+            a = acc[r]
+            a["n_gt"] += len(gt)
+            a["scores"].append(scores)
+            a["tp"].append(match(boxes, scores, gt))
+            detected = bool((scores >= conf).any())
+            a["img"][0] += int(detected and len(gt) > 0)
+            a["img"][1] += int(detected and len(gt) == 0)
+            a["img"][2] += int(not detected and len(gt) > 0)
+
+    out = {"images": len(images)}
+    per = {}
+    for r, a in acc.items():
+        scores = np.concatenate(a["scores"]) if a["scores"] else np.zeros(0)
+        tp = np.concatenate(a["tp"]) if a["tp"] else np.zeros(0, dtype=bool)
+        sel = scores >= conf
+        p, rc, f1 = prf(int(tp[sel].sum()), int((~tp[sel]).sum()), a["n_gt"] - int(tp[sel].sum()))
+        ip, ir, if1 = prf(*a["img"])
+        best_f1, best_conf = 0.0, conf
+        for c in np.linspace(0.05, 0.95, 19):  # informative only; pick the operating point on a validation split
+            s_ = scores >= c
+            _, _, f = prf(int(tp[s_].sum()), int((~tp[s_]).sum()), a["n_gt"] - int(tp[s_].sum()))
+            if f > best_f1:
+                best_f1, best_conf = f, float(c)
+        per[r] = {"gt_boxes": a["n_gt"], "precision": round(p, 4), "recall": round(rc, 4), "f1": round(f1, 4),
+                  "ap50": round(average_precision(scores, tp, a["n_gt"]), 4), "img_precision": round(ip, 4),
+                  "img_recall": round(ir, 4), "img_f1": round(if1, 4), "best_f1": round(best_f1, 4),
+                  "best_f1_conf": round(best_conf, 2)}
+    if len(per) == 1:  # single class (e.g. phone dataset): unprefixed columns
+        out.update(next(iter(per.values())))
+        return out
+    present = [m for m in per.values() if m["gt_boxes"] > 0]
+    for k in ("precision", "recall", "f1", "ap50"):  # macro average over classes present in the split
+        out[k] = round(float(np.mean([m[k] for m in present])), 4) if present else 0.0
+    for r, m in per.items():
+        for k in ("gt_boxes", "precision", "recall", "f1", "ap50"):
+            out[f"{r}_{k}"] = m[k]
+    if "phone" in per:
+        out["img_f1"] = per["phone"]["img_f1"]
+    return out
+
+
+def evaluate(model, images: List[Path], gt_classes: set, imgsz: int, conf: float, device: str,
+             pred_classes: Optional[set] = None, nms_iou: float = 0.5) -> dict:
+    """Phone-only metrics (kept for compatibility)."""
+    pred = {"phone": pred_classes} if pred_classes is not None else None
+    return evaluate_classes(model, images, {"phone": gt_classes}, imgsz, conf, device, nms_iou, pred)
 
 
 # ------------------------------------------------------------------ speed
@@ -235,6 +263,15 @@ def latency(model, frames: List[np.ndarray], imgsz: int, conf: float, device: st
 
 
 # ------------------------------------------------------------------ export
+def model_name(path: Path) -> str:
+    """yolo11n.pt -> yolo11n; runs/detect/yolo11n/weights/best.pt -> yolo11n."""
+    path = Path(path)
+    if path.stem in ("best", "last") and path.parent.name == "weights":
+        return path.parent.parent.name
+    return path.stem
+
+
+
 def path_size_mb(p: Path) -> float:
     if p.is_dir():
         return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) / 1e6
@@ -248,7 +285,7 @@ def export(pt_path: Path, fmt: str, imgsz: int, out_dir: Path, data: Optional[st
     if kwargs.get("int8") and data:
         kwargs["data"] = data  # representative images for INT8 calibration
     produced = Path(YOLO(str(pt_path)).export(**kwargs))
-    stem = f"{pt_path.stem}_{imgsz}_{fmt}"
+    stem = f"{model_name(pt_path)}_{imgsz}_{fmt}"
     if produced.is_dir():  # e.g. yolo11n_ncnn_model/
         dest = out_dir / (stem + "_ncnn_model" if fmt.startswith("ncnn") else stem)
     else:
@@ -287,7 +324,7 @@ def environment() -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("--models", nargs="+", default=["models/yolov8n.pt", "models/yolo11n.pt", "models/yolo26n.pt"])
     ap.add_argument("--imgsz", nargs="+", type=int, default=[640])
     ap.add_argument("--formats", nargs="+", default=["pytorch"], choices=["pytorch", *EXPORT_ARGS])
@@ -307,15 +344,21 @@ def main() -> int:
     out = Path(args.out)
     (out / "exports").mkdir(parents=True, exist_ok=True)
     images: List[Path] = []
-    gt_classes: set = set()
+    targets: Dict[str, set] = {}
     if args.data:
         images, names = load_split(args.data, args.split)
-        gt_classes = set(args.gt_classes) if args.gt_classes else {k for k, v in names.items() if str(v).lower() in PHONE_ALIASES}
-        if not gt_classes and len(names) == 1:
-            gt_classes = {0}
-        if not gt_classes:
-            raise SystemExit(f"No phone class found in {names}; pass --gt-classes")
-        print(f"Dataset: {len(images)} images in split '{args.split}', phone class ids {sorted(gt_classes)}")
+        if args.gt_classes:
+            targets = {"phone": set(args.gt_classes)}
+        else:
+            for k, v in names.items():
+                r = role_of(v)
+                if r:
+                    targets.setdefault(r, set()).add(k)
+        if not targets and len(names) == 1:
+            targets = {"phone": {0}}
+        if not targets:
+            raise SystemExit(f"No known class in {names}; pass --gt-classes for a phone-only dataset")
+        print(f"Dataset: {len(images)} images in split '{args.split}', classes {{role: ids}} = {targets}")
     frames = sample_frames(images)
 
     rows = []
@@ -327,21 +370,21 @@ def main() -> int:
         for imgsz in args.imgsz:
             gflops = get_flops(torch_model.model, imgsz)
             for fmt in args.formats:
-                label = f"{pt.stem} @{imgsz} [{fmt}]"
+                label = f"{model_name(pt)} @{imgsz} [{fmt}]"
                 print(f"\n=== {label} ===")
                 try:
                     path = pt if fmt == "pytorch" else export(pt, fmt, imgsz, out / "exports", args.data)
                     model = YOLO(str(path), task="detect")
-                    row = {"model": pt.stem, "format": fmt, "imgsz": imgsz, "size_mb": round(path_size_mb(path), 2),
+                    row = {"model": model_name(pt), "format": fmt, "imgsz": imgsz, "size_mb": round(path_size_mb(path), 2),
                            "params_m": round(params, 3), "gflops": round(gflops, 2), "nms_free": nms_free}
                     row.update(latency(model, frames, imgsz, args.conf, args.device, args.runs, args.warmup))
                     if images:
-                        row.update(evaluate(model, images, gt_classes, imgsz, args.conf, args.device))
+                        row.update(evaluate_classes(model, images, targets, imgsz, args.conf, args.device))
                     rows.append(row)
                     print(json.dumps(row))
                 except Exception as exc:  # keep benchmarking the other models/formats
                     print(f"FAILED {label}: {exc}")
-                    rows.append({"model": pt.stem, "format": fmt, "imgsz": imgsz, "error": str(exc)[:200]})
+                    rows.append({"model": model_name(pt), "format": fmt, "imgsz": imgsz, "error": str(exc)[:200]})
 
     meta = {"environment": environment(), "args": vars(args), "note": "Desktop measurements are a proxy for mobile performance."}
     (out / "results.json").write_text(json.dumps({"meta": meta, "rows": rows}, indent=2))
@@ -351,7 +394,8 @@ def main() -> int:
         w.writeheader()
         w.writerows(rows)
     cols = [c for c in ["model", "format", "imgsz", "size_mb", "params_m", "gflops", "nms_free", "inference_ms", "post_ms",
-                        "total_ms_median", "total_ms_p95", "fps", "precision", "recall", "f1", "ap50", "img_f1", "error"] if c in keys]
+                        "total_ms_median", "total_ms_p95", "fps", "precision", "recall", "f1", "ap50", "img_f1",
+                        "eye_open_f1", "eye_closed_f1", "yawn_f1", "phone_f1", "error"] if c in keys]
     md = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     md += ["| " + " | ".join(str(r.get(c, "")) for c in cols) + " |" for r in rows]
     env = meta["environment"]

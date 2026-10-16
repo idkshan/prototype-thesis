@@ -17,7 +17,16 @@ from ..config import Config
 from ..severity import piecewise
 from ..types import ContextReading, RiskAssessment, SeverityReport
 from .fuzzy import MamdaniSystem
-from .rules import context_rules, distraction_rules, fatigue_rules, overall_rules, risk_variable, unit_variable
+from .rules import (
+    DROWSINESS_LEVEL_NAMES,
+    context_rules,
+    distraction_rules,
+    fatigue_rules,
+    fatigue_variable,
+    overall_rules,
+    risk_variable,
+    unit_variable,
+)
 
 
 def tier_for(risk: float, bounds) -> str:
@@ -36,12 +45,18 @@ class DriverRiskModel:
         self.cfg = cfg
         res = cfg.risk.resolution
         u = unit_variable
-        self.fatigue = MamdaniSystem("fatigue", [u("eye_closure"), u("yawning"), u("duration")], u("fatigue"), fatigue_rules(), res)
+        self.fatigue = MamdaniSystem("fatigue", [u("eye_closure"), u("yawning"), u("duration")], fatigue_variable(), fatigue_rules(), res)
         self.distraction = MamdaniSystem("distraction", [u("gaze"), u("phone")], u("distraction"), distraction_rules(), res)
         self.context = MamdaniSystem("context", [u("speed"), u("motion")], u("context"), context_rules(), res)
         self.overall = MamdaniSystem(
-            "overall", [u("fatigue"), u("distraction"), u("context")], risk_variable("risk"), overall_rules(), res
+            "overall", [fatigue_variable(), u("distraction"), u("context")], risk_variable("risk"), overall_rules(), res
         )
+        self._fatigue_var = fatigue_variable()
+
+    def drowsiness_level(self, fatigue: float) -> str:
+        """Name of the fatigue set with the highest membership (Alert ... Level 3)."""
+        mu = self._fatigue_var.fuzzify(fatigue)
+        return DROWSINESS_LEVEL_NAMES[max(mu, key=mu.get)]
 
     def normalise_context(self, ctx: ContextReading) -> dict:
         c = self.cfg.context
@@ -72,6 +87,7 @@ class DriverRiskModel:
             context=round(c.value, 4),
             risk=round(r.value, 2),
             tier=tier_for(r.value, self.cfg.risk.tier_bounds),
+            fatigue_level=self.drowsiness_level(f.value),
             inputs={k: round(v, 4) for k, v in inputs.items()},
             top_rules=[f"{rule.text('R')} [{alpha:.2f}]" for rule, alpha in top],
         )

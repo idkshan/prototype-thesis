@@ -5,7 +5,7 @@ import pytest
 from dms.config import Config
 from dms.risk.driver_risk import DriverRiskModel, tier_for
 from dms.risk.fuzzy import FuzzySet, FuzzyVariable, MamdaniSystem, Rule
-from dms.risk.rules import LEVELS, all_rule_blocks, risk_variable, unit_variable
+from dms.risk.rules import FATIGUE_LEVELS, LEVELS, all_rule_blocks, risk_variable, unit_variable
 from dms.types import ContextReading, Severity, SeverityReport
 
 
@@ -31,12 +31,19 @@ def test_triangle_matches_paper_formula():
         assert float(s.mu(x)) == pytest.approx(max(min((x - a) / (b - a), (c - x) / (c - b)), 0))
 
 
-@pytest.mark.parametrize("name,n_inputs", [("fatigue", 3), ("distraction", 2), ("context", 2), ("overall", 3)])
+@pytest.mark.parametrize("name,n_inputs", [("fatigue", 3), ("distraction", 2), ("context", 2)])
 def test_rule_bases_are_complete_and_unique(name, n_inputs):
     rules = all_rule_blocks()[name]
     assert len(rules) == 3**n_inputs
     combos = {tuple(r.antecedent.values()) for r in rules}
     assert combos == set(product(LEVELS, repeat=n_inputs))
+
+
+def test_overall_rule_base_has_four_fatigue_levels():
+    rules = all_rule_blocks()["overall"]
+    assert len(rules) == 4 * 3 * 3
+    combos = {tuple(r.antecedent.values()) for r in rules}
+    assert combos == set(product(FATIGUE_LEVELS, LEVELS, LEVELS))
 
 
 def test_centroid_of_single_fully_fired_rule():
@@ -75,3 +82,23 @@ def test_context_modulates_risk():
     assert _assess(y=0.4, hours=2.5).tier == "MEDIUM"  # long drive escalates moderate fatigue
     assert _assess(hours=3.0).tier == "NONE"  # duration alone never alarms
     assert _assess(speed=110.0).tier == "NONE"  # an alert driver at speed is not an alarm
+
+
+def test_drowsy_and_yawning_together_raise_the_risk():
+    single_yawn, drowsy = 0.4, 0.7
+    assert _assess(y=single_yawn).tier == "LOW"
+    assert _assess(d=drowsy).tier == "MEDIUM"
+    combined = _assess(d=drowsy, y=single_yawn)
+    assert combined.tier == "HIGH"
+    assert combined.fatigue_level.startswith("Level 3")
+    # moderate drowsiness + one yawn: each alone is LOW, together MEDIUM
+    assert _assess(d=0.45).tier == "LOW"
+    assert _assess(d=0.45, y=single_yawn).tier == "MEDIUM"
+
+
+def test_drowsiness_levels_reported():
+    assert _assess().fatigue_level == "Alert"
+    assert _assess(y=0.4).fatigue_level.startswith("Level 1")
+    assert _assess(d=0.7).fatigue_level.startswith("Level 2")
+    assert _assess(d=0.7, hours=2.5).fatigue_level.startswith("Level 3")  # long drive escalates
+    assert _assess(d=0.7, hours=2.5).tier == "HIGH"

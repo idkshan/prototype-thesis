@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -38,7 +38,7 @@ class Detection:
     label: str
     confidence: float
     box: Box
-    role: Optional[str] = None  # e.g. "phone" when the class is a phone
+    role: Optional[str] = None  # phone | eye_open | eye_closed | yawn | no_yawn
     in_driver_roi: bool = True
 
 
@@ -49,6 +49,7 @@ class PerceptionResult:
     detections: List[Detection] = field(default_factory=list)
     eye_closed_prob: Optional[float] = None  # optional learned eye-state classifier
     timings_ms: Dict[str, float] = field(default_factory=dict)
+    detector_roles: Set[str] = field(default_factory=set)  # roles the YOLO model can detect
 
 
 # ----------------------------------------------------------------- Stage 2
@@ -68,6 +69,8 @@ class FrameFeatures:
     blink: Optional[float] = None  # mean eyeBlink blendshape (learned)
     jaw_open: Optional[float] = None  # jawOpen blendshape (learned)
     eye_closed_prob: Optional[float] = None  # learned eye-state classifier
+    eye_closed_yolo: Optional[float] = None  # YOLO driver-state detector: 0..1, >= 0.5 = closed eyes found
+    yawn_yolo: Optional[float] = None  # YOLO driver-state detector: 0..1, >= 0.5 = yawning mouth found
     phone_conf: float = 0.0  # best YOLO phone confidence inside the driver ROI
     phone_boxes: int = 0
 
@@ -149,6 +152,7 @@ class RiskAssessment:
     context: float  # C in [0, 1]
     risk: float  # R in [0, 100]
     tier: str  # NONE / LOW / MEDIUM / HIGH
+    fatigue_level: str = "Alert"  # Alert / Level 1 / Level 2 / Level 3 (drowsiness level)
     inputs: Dict[str, float] = field(default_factory=dict)
     top_rules: List[str] = field(default_factory=list)
 
