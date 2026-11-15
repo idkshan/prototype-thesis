@@ -1,7 +1,7 @@
 """The complete detection model: Stage 1 -> Stage 5 for one frame.
 
     frame --(1) MediaPipe Face Landmarker + YOLO [+ eye-state CNN]
-          --(2) EAR / MAR / head pose / blendshapes / phone-near-driver
+          --(2) EAR / MAR / head pose / blendshapes / phone-near-driver [+ fusion model]
           --(3) calibrated thresholds + temporal persistence
           --(4) per-behaviour severity
           --(5) hierarchical fuzzy risk -> alarm tier -> alert commands
@@ -44,7 +44,12 @@ class DriverMonitor:
             from .perception.eye_state import EyeStateClassifier
 
             self.eye_model = EyeStateClassifier(cfg.eye_model)
-        self.extractor = FeatureExtractor(cfg.detector)
+        self.fusion = None
+        if cfg.fusion.model_path:
+            from .fusion import FusionModel
+
+            self.fusion = FusionModel.load(cfg.fusion.model_path)
+        self.extractor = FeatureExtractor(cfg.detector, fusion=self.fusion)
         self.engine = DecisionEngine(cfg)
         self.alert_sinks = alert_sinks or []
 
@@ -102,7 +107,16 @@ class DriverMonitor:
             calibration_status=out.calibration_status,
             context=out.context,
             timings_ms=timings,
+            alert_state=out.alert_state,
         )
+
+    def camera_lost(self, t: float, reason: str = "no camera frames") -> List[AlertCommand]:
+        """The camera link is down: stop sounding and report "monitoring unavailable"."""
+        cmds = self.engine.camera_lost(t, reason)
+        for cmd in cmds:
+            for sink in self.alert_sinks:
+                sink(cmd)
+        return cmds
 
     def recalibrate(self) -> None:
         self.engine.recalibrate()

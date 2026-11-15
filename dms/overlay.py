@@ -25,7 +25,7 @@ def _bar(img, x, y, w, value, color, label):
     _text(img, label, (x + w + 6, y + 10), scale=0.42)
 
 
-def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None) -> np.ndarray:
+def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None, warning: str = "") -> np.ndarray:
     img = frame.copy()
     h, w = img.shape[:2]
     p = r.perception
@@ -59,7 +59,8 @@ def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None) -> np.ndar
     f, s = r.features, r.states
     tier_color = TIER_COLORS[r.active_tier]
     cv2.rectangle(canvas, (w, 0), (w + panel_w, 34), tier_color, -1)
-    _text(canvas, f"ALERT: {r.active_tier}   R={r.risk.risk:.0f}", (x, 23), (255, 255, 255), 0.6, 2)
+    _text(canvas, f"{r.alert_state} {r.active_tier if r.active_tier != 'NONE' else ''}  risk {r.risk.tier} R={r.risk.risk:.0f}",
+          (x, 23), (255, 255, 255), 0.5, 2)
     y = 55
     _text(canvas, f"calibration: {r.calibration_status}", (x, y), scale=0.45)
     if fps:
@@ -78,7 +79,9 @@ def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None) -> np.ndar
         _bar(canvas, x, y, 120, val or 0.0, (0, 200, 255), label)
         y += 18
     b = r.behavior
-    _text(canvas, f"closure {b.closure_s:.1f}s  PERCLOS {fmt(b.perclos, 2)}", (x, y + 6), scale=0.42)
+    _text(canvas, f"drowsiness: {b.drowsiness_state.replace('_', ' ')}", (x, y + 6), (0, 220, 255) if b.drowsy else (255, 255, 255), 0.45)
+    y += 18
+    _text(canvas, f"closure {b.closure_s:.1f}s  PERCLOS {fmt(b.perclos, 2)}  long {b.long_closures}", (x, y + 6), scale=0.42)
     y += 20
     _text(canvas, f"yawns {b.yawns_in_window}  away {b.gaze_away_s:.1f}s  phone {b.phone_s:.1f}s", (x, y + 6), scale=0.42)
     y += 26
@@ -94,4 +97,8 @@ def draw(frame: np.ndarray, r: FrameResult, fps: float | None = None) -> np.ndar
         _bar(canvas, x, y - 9, 120, val, (255, 180, 0), f"{label} {val:.2f}")
     if b.no_face:
         _text(canvas, "NO FACE - monitoring degraded", (10, h - 12), (0, 0, 255), 0.6, 2)
+    elif s.eyes_not_judged and s.eyes_not_judged != "no_face":
+        _text(canvas, f"eyes not judged: {s.eyes_not_judged}", (10, h - 12), (0, 200, 255), 0.5, 1)
+    if warning:
+        _text(canvas, warning[:90], (10, 20), (0, 0, 255), 0.45, 1)
     return canvas

@@ -22,15 +22,25 @@ class EpisodeTracker:
         self._fired: Set[str] = set()
         self._ended: Deque[Tuple[float, float]] = deque(maxlen=64)  # (start, end)
 
-    def update(self, t: float, on: Optional[bool]) -> None:
+    def update(self, t: float, on: Optional[bool]) -> Optional[Tuple[float, float]]:
+        """Feed one frame (None = state unknown, treated like OFF). Returns the episode that just ended, if any."""
         if on:
             if not self.active:
                 self.active, self.start = True, t
                 self._fired.clear()
             self.last_on = t
         elif self.active and t - self.last_on > self.gap_s:
-            self._ended.append((self.start, self.last_on))
-            self.active = False
+            return self.force_end()
+        return None
+
+    def force_end(self) -> Optional[Tuple[float, float]]:
+        """End the ongoing episode at its last ON frame (e.g. after a camera stall)."""
+        if not self.active:
+            return None
+        ended = (self.start, self.last_on)
+        self._ended.append(ended)
+        self.active = False
+        return ended
 
     def duration(self) -> float:
         return self.last_on - self.start if self.active else 0.0
@@ -77,6 +87,13 @@ class TimeWeightedRatio:
         """Advance time without a sample (state not observable on this frame)."""
         self._last_t = t
 
+    def reset(self) -> None:
+        """Forget everything (used when the drowsiness state recovers)."""
+        self._samples.clear()
+        self._last_t = None
+        self._on = 0.0
+        self._total = 0.0
+
     @property
     def coverage_s(self) -> float:
         return max(0.0, self._total)
@@ -100,3 +117,11 @@ class EventWindow:
         while self._times and t - self._times[0] > self.window_s:
             self._times.popleft()
         return len(self._times)
+
+    def count_since(self, t: float, since: float) -> int:
+        """Events inside the window that happened after ``since``."""
+        self.count(t)
+        return sum(1 for x in self._times if x > since)
+
+    def last(self) -> Optional[float]:
+        return self._times[-1] if self._times else None

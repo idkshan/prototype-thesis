@@ -5,8 +5,11 @@
     Context     C = FIS(speed, erratic motion)                    in [0, 1]
     Overall     R = FIS(F, D, C)                                  in [0, 100]
 
-R is mapped to an alarm tier with fixed bounds (default 25 / 52.5 / 77.5,
-the midpoints between the centroids of neighbouring output sets).
+R is mapped to a risk tier with fixed bounds (default 25 / 52.5 / 77.5,
+the midpoints between the centroids of neighbouring output sets) and a
+hysteresis band: a tier is entered when R reaches its lower bound and left
+only when R falls ``tier_hysteresis`` (5) points below it, so R hovering
+around a bound does not flip the tier (and the alarm) back and forth.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from ..severity import piecewise
 from ..types import ContextReading, RiskAssessment, SeverityReport
 from .fuzzy import MamdaniSystem
 from .rules import (
-    DROWSINESS_LEVEL_NAMES,
+    FATIGUE_LEVEL_NAMES,
     context_rules,
     distraction_rules,
     fatigue_rules,
@@ -27,6 +30,9 @@ from .rules import (
     risk_variable,
     unit_variable,
 )
+
+
+TIERS = ("NONE", "LOW", "MEDIUM", "HIGH")
 
 
 def tier_for(risk: float, bounds) -> str:
@@ -38,6 +44,26 @@ def tier_for(risk: float, bounds) -> str:
     if risk >= low:
         return "LOW"
     return "NONE"
+
+
+class TierTracker:
+    """Risk tier with hysteresis: up at the bound, down only below bound - margin."""
+
+    def __init__(self, bounds, margin: float):
+        self.bounds, self.margin = list(bounds), margin
+        self.tier = "NONE"
+
+    def update(self, risk: float) -> str:
+        raw = tier_for(risk, self.bounds)
+        cur = TIERS.index(self.tier)
+        if TIERS.index(raw) > cur:
+            self.tier = raw
+        else:
+            # step down while R is below the current tier's lower bound minus the margin
+            while cur > 0 and risk < self.bounds[cur - 1] - self.margin:
+                cur -= 1
+            self.tier = TIERS[cur]
+        return self.tier
 
 
 class DriverRiskModel:
@@ -52,19 +78,23 @@ class DriverRiskModel:
             "overall", [fatigue_variable(), u("distraction"), u("context")], risk_variable("risk"), overall_rules(), res
         )
         self._fatigue_var = fatigue_variable()
+        self.tiers = TierTracker(cfg.risk.tier_bounds, cfg.risk.tier_hysteresis)
 
-    def drowsiness_level(self, fatigue: float) -> str:
-        """Name of the fatigue set with the highest membership (Alert ... Level 3)."""
+    def fatigue_level(self, fatigue: float) -> str:
+        """Name of the fatigue set with the highest membership (Low / Moderate / High / Severe)."""
         mu = self._fatigue_var.fuzzify(fatigue)
-        return DROWSINESS_LEVEL_NAMES[max(mu, key=mu.get)]
+        return FATIGUE_LEVEL_NAMES[max(mu, key=mu.get)]
 
     def normalise_context(self, ctx: ContextReading) -> dict:
+        """Context sensors -> 0..1. Missing speed = assumed moving (flagged as speed_assumed = 1)."""
         c = self.cfg.context
-        speed_kmh: Optional[float] = ctx.speed_kmh if ctx.speed_kmh is not None else c.assumed_speed_kmh
+        assumed = ctx.speed_kmh is None
+        speed_kmh: Optional[float] = c.assumed_speed_kmh if assumed else ctx.speed_kmh
         return {
             "speed": piecewise(c.speed_kmh, speed_kmh),
             "motion": piecewise(c.motion_g, ctx.motion_g or 0.0),
             "duration": piecewise(c.driving_hours, ctx.driving_s / 3600.0),
+            "speed_assumed": 1.0 if assumed else 0.0,
         }
 
     def assess(self, sev: SeverityReport, ctx: ContextReading) -> RiskAssessment:
@@ -86,8 +116,9 @@ class DriverRiskModel:
             distraction=round(d.value, 4),
             context=round(c.value, 4),
             risk=round(r.value, 2),
-            tier=tier_for(r.value, self.cfg.risk.tier_bounds),
-            fatigue_level=self.drowsiness_level(f.value),
+            tier=self.tiers.update(r.value),
+            raw_tier=tier_for(r.value, self.cfg.risk.tier_bounds),
+            fatigue_level=self.fatigue_level(f.value),
             inputs={k: round(v, 4) for k, v in inputs.items()},
             top_rules=[f"{rule.text('R')} [{alpha:.2f}]" for rule, alpha in top],
         )

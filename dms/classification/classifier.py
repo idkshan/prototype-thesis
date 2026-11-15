@@ -1,153 +1,87 @@
 """Stage 3: threshold-based classification of the AI-derived visual features.
 
 This is the rule-based layer. It does not look at pixels; it *interprets*
-what the neural networks of Stage 1 measured (MediaPipe landmarks and
-blendshapes, the YOLO driver-state detections, the optional eye-state CNN):
+what the neural networks of Stage 1 measured. The actual rules for each
+behaviour live in ``dms/behaviors/`` (one module per behaviour); this class
+runs them in the right order for every frame and merges their results:
 
-1. Per-frame states - fused evidence >= decision level (0.5) switches a state
-   ON: eyes closed, mouth wide open, head turned away, phone visible.
-2. Temporal persistence - a state only becomes a behaviour once it lasts long
-   enough (blinks, speech and mirror glances are rejected), and sliding
-   windows summarise longer patterns (PERCLOS, yawn count, off-road time).
+    1. classify_frame(): per-frame states    quality -> gaze -> phone -> yawning -> drowsiness
+       (drowsiness last: the eyes are not judged while the head is turned away,
+       a phone is in view or the driver is yawning)
+    2. update(): temporal behaviour          episodes, events, windows, drowsiness state
+
+The output separates what is happening NOW (``BehaviorStatus.active``: the
+behaviours that may keep an alert sounding) from what happened RECENTLY
+(windows such as PERCLOS, yawn count and off-road ratio, which raise the
+assessed risk level but must not keep an alarm going on their own).
 """
 
 from __future__ import annotations
 
 import math
-from typing import Optional
 
+from ..behaviors import DrowsinessDetector, FrameQuality, GazeDetector, PhoneDetector, YawningDetector
 from ..config import Config
 from ..types import BehaviorStatus, FrameFeatures, FrameStates
 from .calibration import Thresholds
-from .evidence import fuse, ramp_evidence
-from .temporal import EpisodeTracker, EventWindow, TimeWeightedRatio
 
 
 class BehaviorClassifier:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        tc = cfg.temporal
-        self.closure = EpisodeTracker(tc.closure_gap_s)
-        self.mouth = EpisodeTracker(tc.yawn_gap_s)
-        self.gaze = EpisodeTracker(tc.gaze_gap_s)
-        self.phone = EpisodeTracker(tc.phone_gap_s)
-        self.perclos = TimeWeightedRatio(tc.perclos_window_s)
-        self.offroad = TimeWeightedRatio(tc.offroad_window_s)
-        self.yawns = EventWindow(tc.yawn_window_s)
-        self._last_face_t: Optional[float] = None
-        self._last_mouth_active_t = -math.inf
+        self.quality = FrameQuality(cfg.quality)
+        self.gaze = GazeDetector(cfg)
+        self.phone = PhoneDetector(cfg)
+        self.yawning = YawningDetector(cfg)
+        self.drowsiness = DrowsinessDetector(cfg, self.quality)
         self.last_event_t = -math.inf
 
     # ------------------------------------------------------ per-frame states
     def classify_frame(self, f: FrameFeatures, thr: Thresholds) -> FrameStates:
-        ev, tc, b = self.cfg.evidence, self.cfg.temporal, thr.baseline
-        level = thr.decision_level
-        st = FrameStates(phone_visible=f.phone_conf > 0.0)
-
-        if not f.face_present:
-            if self._last_face_t is not None:
-                st.face_lost_s = f.t - self._last_face_t
-                # A face that vanishes mid-drive usually means the head turned
-                # far away from the camera (beyond the landmark model's range).
-                if tc.face_loss_as_gaze_away and st.face_lost_s <= tc.face_loss_max_s:
-                    st.head_away = True
-            return st
-
-        self._last_face_t = f.t
-
-        # Head pose -> gaze deviation evidence (deviation from the driver's own forward pose)
-        if f.yaw is not None and f.pitch is not None:
-            dp = f.pitch - b.pitch
-            st.pose_evidence = max(
-                ramp_evidence(abs(f.yaw - b.yaw), 0.0, thr.yaw_limit),
-                ramp_evidence(-dp, 0.0, thr.pitch_down_limit),
-                ramp_evidence(dp, 0.0, thr.pitch_up_limit),
-            )
-            st.head_away = st.pose_evidence >= level
-
-        # Mouth: geometric MAR + learned jawOpen blendshape + YOLO yawn detection
-        mouth = {
-            "mar": ramp_evidence(f.mar, b.mar, thr.mar_open),
-            "blendshape": ramp_evidence(f.jaw_open, b.jaw, thr.jaw_open),
-            "yolo": f.yawn_yolo,
-        }
-        st.mouth_sources = {k: v for k, v in mouth.items() if v is not None}
-        st.mouth_evidence = fuse(mouth, {"mar": ev.mouth_mar, "blendshape": ev.mouth_blendshape, "yolo": ev.mouth_yolo})
-        if st.mouth_evidence is not None:
-            st.mouth_open = st.mouth_evidence >= level
-            if st.mouth_evidence >= tc.yawn_eye_guard_level:
-                self._last_mouth_active_t = f.t
-
-        # Eyes: geometric EAR + learned eyeBlink blendshape + YOLO eye detection
-        # (+ optional eye-state CNN)
-        eyes = {
-            "ear": ramp_evidence(f.ear, b.ear, thr.ear_closed),
-            "blendshape": ramp_evidence(f.blink, b.blink, thr.blink_closed),
-            "cnn": f.eye_closed_prob,
-            "yolo": f.eye_closed_yolo,
-        }
-        st.eye_sources = {k: v for k, v in eyes.items() if v is not None}
-        st.eye_evidence = fuse(eyes, {"ear": ev.eye_ear, "blendshape": ev.eye_blendshape, "cnn": ev.eye_cnn, "yolo": ev.eye_yolo})
-        # Eye state is not judged while the head is turned/lowered (EAR drops when
-        # looking down), while a phone is in view (eyes look down at it), or while
-        # the mouth is opening for / just closed after a yawn (eyes squint).
-        yawn_guard = st.mouth_open or (f.t - self._last_mouth_active_t) <= tc.yawn_eye_guard_s
-        phone_guard = tc.suspend_eyes_when_phone and st.phone_visible
-        if st.eye_evidence is not None and not st.head_away and not yawn_guard and not phone_guard:
-            st.eyes_closed = st.eye_evidence >= level
+        st = FrameStates()
+        st.frame_gap = self.quality.check_gap(f.t)
+        self.gaze.frame_state(f, thr, st)
+        self.phone.frame_state(f, st)
+        self.yawning.frame_state(f, thr, st)
+        self.drowsiness.frame_state(f, thr, st, mouth_guard=self.yawning.eye_guard(f.t, st))
         return st
 
     # ---------------------------------------------------- temporal behaviour
-    def update(self, f: FrameFeatures, s: FrameStates) -> BehaviorStatus:
-        t, tc = f.t, self.cfg.temporal
-        events = []
+    def update(self, f: FrameFeatures, st: FrameStates) -> BehaviorStatus:
+        t, gap = f.t, st.frame_gap
+        gaze = self.gaze.update(t, st, gap)
+        phone = self.phone.update(t, st, gap)
+        yawn = self.yawning.update(t, st, gap)
+        drowsy = self.drowsiness.update(t, st, gap, self.yawning.yawns)
 
-        self.closure.update(t, s.eyes_closed)
-        if s.eyes_closed is None:
-            self.perclos.skip(t)
-        else:
-            self.perclos.add(t, s.eyes_closed)
-        if self.closure.fire_once("closure", tc.closure_event_s):
-            events.append("eye_closure")
-
-        self.mouth.update(t, s.mouth_open)
-        if self.mouth.fire_once("yawn", tc.yawn_min_s):
-            self.yawns.add(t)
-            events.append("yawn")
-
-        self.gaze.update(t, s.head_away)
-        if s.head_away is None:
-            self.offroad.skip(t)
-        else:
-            self.offroad.add(t, s.head_away)
-        if self.gaze.fire_once("gaze", tc.gaze_min_s):
-            events.append("gaze_deviation")
-
-        self.phone.update(t, s.phone_visible)
-        if self.phone.fire_once("phone", tc.phone_confirm_s):
-            events.append("phone_usage")
-
+        events = drowsy.events + yawn.events + gaze.events + phone.events
         if events:
             self.last_event_t = t
-
-        perclos = self.perclos.ratio if self.perclos.coverage_s >= tc.perclos_min_coverage_s else None
-        no_face = not f.face_present and (self._last_face_t is None or s.face_lost_s > tc.face_loss_max_s)
+        active = [name for name, on in (("eye_closure", drowsy.eye_closure), ("yawning", yawn.yawning),
+                                         ("gaze_deviation", gaze.gaze_deviation), ("phone_usage", phone.phone_usage)) if on]
         return BehaviorStatus(
-            closure_s=self.closure.recent_max(t, tc.closure_hold_s),
-            perclos=perclos,
-            mouth_open_s=self.mouth.duration(),
-            yawns_in_window=self.yawns.count(t),
-            gaze_away_s=self.gaze.recent_max(t, tc.gaze_hold_s),
-            # off-road time over a fixed window length (not over observed time),
-            # so a single glance early in a session is not over-weighted
-            offroad_ratio=self.offroad.ratio * min(1.0, self.offroad.coverage_s / tc.offroad_window_s),
-            phone_s=self.phone.recent_max(t, tc.phone_hold_s),
-            yawning=self.mouth.active and self.mouth.duration() >= tc.yawn_min_s,
-            gaze_deviation=self.gaze.active and self.gaze.duration() >= tc.gaze_min_s,
-            phone_usage=self.phone.active and self.phone.duration() >= tc.phone_confirm_s,
+            closure_s=drowsy.closure_s,
+            perclos=drowsy.perclos,
+            mouth_open_s=yawn.mouth_open_s,
+            yawns_in_window=yawn.yawns_in_window,
+            gaze_away_s=gaze.gaze_away_s,
+            offroad_ratio=gaze.offroad_ratio,
+            phone_s=phone.phone_s,
+            long_closures=drowsy.long_closures,
+            blink_rate_per_min=drowsy.blink_rate_per_min,
+            eye_level=drowsy.eye_level,
+            drowsiness_state=drowsy.state,
+            drowsy=drowsy.state != "alert",
+            eye_closure=drowsy.eye_closure,
+            yawning=yawn.yawning,
+            gaze_deviation=gaze.gaze_deviation,
+            phone_usage=phone.phone_usage,
             events=events,
-            no_face=no_face,
+            active=active,
+            no_face=gaze.no_face,
+            face_status=st.face_status,
+            data_valid=f.face_present and not gap and st.eyes_not_judged != "quality",
         )
 
     def any_episode_active(self) -> bool:
-        return self.closure.active or self.mouth.active or self.gaze.active or self.phone.active
+        return self.drowsiness.active or self.yawning.active or self.gaze.active or self.phone.active

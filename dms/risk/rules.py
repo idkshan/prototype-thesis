@@ -26,12 +26,11 @@ from .fuzzy import FuzzySet, FuzzyVariable, Rule
 
 LEVELS = ("Low", "Moderate", "High")
 FATIGUE_LEVELS = ("Low", "Moderate", "High", "Severe")
-DROWSINESS_LEVEL_NAMES = {
-    "Low": "Alert",
-    "Moderate": "Level 1 (slightly drowsy)",
-    "High": "Level 2 (moderately drowsy)",
-    "Severe": "Level 3 (severely drowsy)",
-}
+# Fatigue RISK levels (fuzzy output F). Not the same thing as the drowsiness
+# STATE of Table 1.11 (dms/behaviors/drowsiness.py): the state says how drowsy
+# the driver looks; the fatigue level also counts yawning separately, the
+# drowsy + yawning combination and the driving duration, and decides the alarm.
+FATIGUE_LEVEL_NAMES = {"Low": "Low", "Moderate": "Moderate", "High": "High", "Severe": "Severe"}
 RISK_LEVELS = ("NONE", "LOW", "MEDIUM", "HIGH")  # = alarm tiers of SO5
 
 # Table 1.7: Low peaks at 0 and fades by 0.4; Moderate rises from 0.3, peaks

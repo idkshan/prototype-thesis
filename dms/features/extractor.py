@@ -5,16 +5,21 @@ EAR and MAR from landmark geometry, head pose from solvePnP, the learned
 blendshape scores, the optional eye-state probability, the confidence of any
 YOLO phone detection located near the driver, and - with a driver-state YOLO
 model - YOLO's eye-closed and yawn scores for boxes inside the driver's face.
+With a fusion model (dms/fusion) it also adds the model's P(eyes closed) and
+P(yawning), computed from all numbers of the picture together.
 """
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from ..config import ObjectDetectorConfig
 from ..types import FaceObservation, FrameFeatures, PerceptionResult
-from .geometry import LEFT_EYE_EAR, RIGHT_EYE_EAR, eye_aspect_ratio, mouth_aspect_ratio
+from .geometry import LEFT_EYE_EAR, RIGHT_EYE_EAR, eye_aspect_ratio, eye_width, mouth_aspect_ratio
 from .head_pose import estimate_head_pose
+
+if TYPE_CHECKING:
+    from ..fusion import FusionModel
 
 
 def phone_in_driver_roi(box, face: FaceObservation | None, frame_h: int, cfg: ObjectDetectorConfig) -> bool:
@@ -60,8 +65,9 @@ def _best(confs: Iterable[float]) -> Optional[float]:
 
 
 class FeatureExtractor:
-    def __init__(self, detector_cfg: ObjectDetectorConfig):
+    def __init__(self, detector_cfg: ObjectDetectorConfig, fusion: Optional["FusionModel"] = None):
         self.detector_cfg = detector_cfg
+        self.fusion = fusion
 
     def extract(self, perception: PerceptionResult, t: float) -> FrameFeatures:
         w, h = perception.frame_size
@@ -71,6 +77,8 @@ class FeatureExtractor:
         for det in perception.detections:
             if det.role != "phone":
                 continue
+            # (the detector runs at the lower phone_stay_conf; the phone module
+            #  decides which confidences start or continue an episode)
             det.in_driver_roi = phone_in_driver_roi(det.box, face, h, self.detector_cfg)
             if det.in_driver_roi:
                 phone_boxes += 1
@@ -82,7 +90,7 @@ class FeatureExtractor:
         # YOLO driver-state detections inside the driver's face
         parts = {"eye_open": [], "eye_closed": [], "yawn": [], "no_yawn": []}
         for det in perception.detections:
-            if det.role in parts:
+            if det.role in parts and det.confidence >= self.detector_cfg.conf:
                 det.in_driver_roi = inside_face(det.box, face, self.detector_cfg.face_part_margin)
                 if det.in_driver_roi:
                     parts[det.role].append(det.confidence)
@@ -104,7 +112,10 @@ class FeatureExtractor:
         blink = None
         if "eyeBlinkLeft" in bs and "eyeBlinkRight" in bs:
             blink = (bs["eyeBlinkLeft"] + bs["eyeBlinkRight"]) / 2.0
-        return FrameFeatures(
+        look_down = None
+        if "eyeLookDownLeft" in bs and "eyeLookDownRight" in bs:
+            look_down = (bs["eyeLookDownLeft"] + bs["eyeLookDownRight"]) / 2.0
+        features = FrameFeatures(
             t=t,
             face_present=True,
             ear=(ear_l + ear_r) / 2.0,
@@ -121,4 +132,13 @@ class FeatureExtractor:
             yawn_yolo=yawn_yolo,
             phone_conf=phone_conf,
             phone_boxes=phone_boxes,
+            eye_width_px=(eye_width(pts, LEFT_EYE_EAR) + eye_width(pts, RIGHT_EYE_EAR)) / 2.0,
+            look_down=look_down,
         )
+        if self.fusion is not None:
+            from ..fusion import fusion_inputs
+
+            probs = self.fusion.predict(fusion_inputs(face, features))
+            features.eye_closed_fusion = probs.get("eye_closed")
+            features.yawn_fusion = probs.get("yawn")
+        return features

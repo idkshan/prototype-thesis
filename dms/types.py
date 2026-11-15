@@ -71,8 +71,12 @@ class FrameFeatures:
     eye_closed_prob: Optional[float] = None  # learned eye-state classifier
     eye_closed_yolo: Optional[float] = None  # YOLO driver-state detector: 0..1, >= 0.5 = closed eyes found
     yawn_yolo: Optional[float] = None  # YOLO driver-state detector: 0..1, >= 0.5 = yawning mouth found
+    eye_closed_fusion: Optional[float] = None  # fusion model: P(eyes closed) from all numbers of this picture
+    yawn_fusion: Optional[float] = None  # fusion model: P(yawning) from all numbers of this picture
     phone_conf: float = 0.0  # best YOLO phone confidence inside the driver ROI
     phone_boxes: int = 0
+    eye_width_px: Optional[float] = None  # mean eye-corner distance in pixels (landmark reliability, SO1 resolution)
+    look_down: Optional[float] = None  # mean eyeLookDown blendshape (eyes looking down without closing)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -93,6 +97,9 @@ class FrameStates:
     pose_evidence: Optional[float] = None
     phone_visible: bool = False
     face_lost_s: float = 0.0
+    face_status: str = "ok"  # ok | lost_turning (counts as gaze away) | lost (unknown) | absent (no driver)
+    eyes_not_judged: Optional[str] = None  # why the eye state is unknown: head_away | phone | yawn | quality | no_face
+    frame_gap: bool = False  # this frame follows a camera stall (> quality.max_frame_gap_s)
 
 
 @dataclass
@@ -106,13 +113,21 @@ class BehaviorStatus:
     gaze_away_s: float = 0.0
     offroad_ratio: float = 0.0
     phone_s: float = 0.0
+    long_closures: int = 0  # closures >= temporal.closure_event_s inside the drowsiness window
+    blink_rate_per_min: Optional[float] = None
+    eye_level: int = 0  # eye-based drowsiness level 0/1/2 (input of the risk model)
+    drowsiness_state: str = "alert"  # alert | slightly_drowsy | moderately_drowsy (thesis Table 1.11)
     # Behaviour "detected" flags (used for F1 evaluation, SO3)
-    drowsy: bool = False
+    drowsy: bool = False  # drowsiness_state != alert
+    eye_closure: bool = False  # eyes closed >= temporal.closure_event_s right now
     yawning: bool = False
     gaze_deviation: bool = False
     phone_usage: bool = False
     events: List[str] = field(default_factory=list)  # new events on this frame
+    active: List[str] = field(default_factory=list)  # behaviours happening NOW (sustain an alert)
     no_face: bool = False  # face missing for longer than face_loss_max_s
+    face_status: str = "ok"
+    data_valid: bool = True  # False: this frame's eye/mouth measurements are unknown (no face, poor quality, gap)
 
 
 # ----------------------------------------------------------------- Stage 4
@@ -142,7 +157,11 @@ class SeverityReport:
 class ContextReading:
     speed_kmh: Optional[float] = None
     motion_g: Optional[float] = None
-    driving_s: float = 0.0
+    driving_s: float = 0.0  # continuous driving time (resets after a long stop)
+    speed_source: str = "unknown"  # gps | fixed | assumed | unknown - "assumed" = GPS missing or stale
+    gps_age_s: Optional[float] = None  # age of the GPS fix used
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 @dataclass
@@ -151,20 +170,40 @@ class RiskAssessment:
     distraction: float  # D in [0, 1]
     context: float  # C in [0, 1]
     risk: float  # R in [0, 100]
-    tier: str  # NONE / LOW / MEDIUM / HIGH
-    fatigue_level: str = "Alert"  # Alert / Level 1 / Level 2 / Level 3 (drowsiness level)
+    tier: str  # NONE / LOW / MEDIUM / HIGH (with hysteresis, see RiskConfig.tier_hysteresis)
+    fatigue_level: str = "Low"  # fuzzy fatigue output: Low / Moderate / High / Severe
+    raw_tier: str = "NONE"  # tier from R without hysteresis
     inputs: Dict[str, float] = field(default_factory=dict)
     top_rules: List[str] = field(default_factory=list)
 
 
 @dataclass
 class AlertCommand:
+    """One entry of the alert stream (also written to alerts.jsonl).
+
+    ``event`` says what happened:
+      start / escalate / deescalate / stop      alert lifecycle (state changes)
+      beep                                      one sound of the current pattern
+      keepalive                                 "still sounding" (device fail-safe)
+      push                                      push notification to the supervisor
+      unavailable / available                   camera link lost / restored
+    ``action`` is the buzzer mode the device should be in afterwards:
+      soft_beep (LOW) | repeating_buzzer (MEDIUM) | alarm (HIGH) | off
+    """
+
     t: float
     tier: str
-    action: str  # soft_beep | repeating_buzzer | alarm
+    action: str
     push: bool
     reason: str
-    new_episode: bool  # True when this starts a new alert episode (used for FP/hour)
+    new_episode: bool  # True on "start" (kept for older evaluation scripts)
+    event: str = "beep"
+    id: str = ""  # unique id (de-duplication on the phone / Firebase)
+    alert_id: str = ""  # id of the alert episode this entry belongs to
+    behaviors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 @dataclass
@@ -182,3 +221,4 @@ class FrameResult:
     calibration_status: str
     context: Optional[ContextReading] = None
     timings_ms: Dict[str, float] = field(default_factory=dict)
+    alert_state: str = "MONITORING"

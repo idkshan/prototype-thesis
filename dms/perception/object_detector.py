@@ -61,7 +61,9 @@ class ObjectDetector:
         res = self.model.predict(
             frame_bgr,
             imgsz=self.cfg.imgsz,
-            conf=self.cfg.conf,
+            # run at the lower "stay" confidence so an ongoing phone episode is not
+            # lost on hard frames; eye / yawn boxes are filtered at cfg.conf later
+            conf=min(self.cfg.conf, self.cfg.phone_stay_conf),
             iou=self.cfg.iou,
             device=self.cfg.device,
             verbose=False,

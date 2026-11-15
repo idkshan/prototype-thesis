@@ -51,7 +51,8 @@ class ObjectDetectorConfig:
 
     model_path: str = "models/yolov8n.pt"
     imgsz: int = 640
-    conf: float = 0.35
+    conf: float = 0.35  # a box counts from this confidence (phone episodes start here; eye / yawn boxes)
+    phone_stay_conf: float = 0.20  # an ongoing phone episode continues down to this confidence (hysteresis)
     iou: float = 0.5
     device: str = "cpu"
     every_n_frames: int = 1  # run YOLO every N frames and reuse results in between
@@ -87,6 +88,19 @@ class EyeStateModelConfig:
     imgsz: Optional[int] = None  # None -> use the size the model was trained with
 
 
+@dataclass
+class FusionModelConfig:
+    """Optional picture-based fusion model (dms/fusion, scripts/train_fusion.py).
+
+    Disabled when ``model_path`` is null. When enabled, a small trained network
+    looks at all numbers of one picture together (EAR per eye, MAR, head angles,
+    52 blendshapes) and gives P(eyes closed) and P(yawning); these become the
+    evidence sources ``eye_fusion`` and ``mouth_fusion``.
+    """
+
+    model_path: Optional[str] = None
+
+
 # --------------------------------------------------------------------------
 # Stage 3 - threshold-based classification
 # --------------------------------------------------------------------------
@@ -104,9 +118,11 @@ class EvidenceWeights:
     eye_blendshape: float = 0.5
     eye_cnn: float = 0.5
     eye_yolo: float = 0.5  # YOLO driver-state detector (eye_open / eye_closed boxes)
+    eye_fusion: float = 0.5  # picture-based fusion model (only if fusion.model_path is set)
     mouth_mar: float = 0.5
     mouth_blendshape: float = 0.5
     mouth_yolo: float = 0.5  # YOLO driver-state detector (yawn boxes)
+    mouth_fusion: float = 0.5  # picture-based fusion model (only if fusion.model_path is set)
 
 
 @dataclass
@@ -145,6 +161,10 @@ class CalibrationConfig:
     min_ear: float = 0.18  # eyes must be open
     max_mar: float = 0.25  # mouth must be closed / neutral
     max_blink: float = 0.5
+    # The camera should face the driver. A baseline head pose further than this
+    # from straight-on is accepted but flagged: eye and mouth geometry become
+    # unreliable (the S01 recording was calibrated at 43 deg yaw).
+    max_camera_offset_deg: float = 25.0
     # Online adaptation (Section 1.7.9): slow exponential update over frames in
     # which the driver is confidently alert and facing forward.
     adapt: bool = True
@@ -167,9 +187,7 @@ class TemporalConfig:
     gaze_min_s: float = 2.0  # glances shorter than this are normal mirror checks
     gaze_gap_s: float = 0.3
     phone_confirm_s: float = 3.0  # Section 1.7.15: phone visible >= 3 s
-    phone_gap_s: float = 0.5
-    perclos_window_s: float = 60.0
-    perclos_min_coverage_s: float = 30.0  # PERCLOS ignored until half a window of data exists
+    phone_gap_s: float = 1.0  # S01: real phone use was detected in only ~50-80 % of frames; 0.5 s split episodes
     offroad_window_s: float = 30.0
     yawn_window_s: float = 300.0
     closure_hold_s: float = 3.0  # keep reporting a long closure briefly after the eyes reopen
@@ -185,6 +203,54 @@ class TemporalConfig:
     yawn_eye_guard_s: float = 0.5
 
 
+@dataclass
+class QualityConfig:
+    """When is a frame good enough to judge the eyes / mouth / head?
+
+    Missing or unreliable measurements are treated as UNKNOWN - never as eyes
+    closed or head turned - so camera problems cannot raise a drowsiness alarm.
+    """
+
+    max_frame_gap_s: float = 1.0  # a longer pause between frames (camera stall) ends every ongoing episode
+    min_eye_width_px: float = 12.0  # eye narrower than this in the image -> eye state not judged (face too small/far)
+    # A vanishing face counts as "head turned away" only if the head was already
+    # turning (pose evidence >= this within the last face_loss_lookback_s).
+    # Otherwise (hand over the camera, glare, dropout) the gaze is unknown.
+    face_loss_turning_evidence: float = 0.3
+    face_loss_lookback_s: float = 0.5
+    # Learned eyeLookDown blendshape at/above this drops the geometric EAR from
+    # the eye evidence (eyelids lower when the eyes look down at the dashboard).
+    # 1.0 = off. Unvalidated: tune on the validation split before enabling.
+    look_down_ear_guard: float = 1.0
+
+
+@dataclass
+class DrowsinessConfig:
+    """Drowsiness STATE (thesis Table 1.11: alert / slightly / moderately drowsy).
+
+    Criteria are checked over a look-back window. The defaults mirror the
+    severity anchors (PERCLOS 8 % / 15 %, closure 0.8 s / 1.5 s) and the
+    Table 1.11 descriptions ("frequent yawning", "slow / frequent blinks").
+    They are starting points: tune them on the VALIDATION participants.
+    """
+
+    window_s: float = 60.0  # look-back for PERCLOS, long closures and the longest closure
+    perclos_min_coverage_s: float = 30.0  # PERCLOS needs this much observed time since the last reset
+    slight_perclos: float = 0.08
+    moderate_perclos: float = 0.15
+    slight_closure_s: float = 0.8  # a closure this long inside the window -> slightly drowsy
+    moderate_closure_s: float = 1.5  # microsleep -> moderately drowsy
+    slight_long_closures: int = 2  # this many closures >= temporal.closure_event_s ("slow blinks") in the window
+    moderate_long_closures: int = 4
+    slight_yawns: int = 2  # yawns within temporal.yawn_window_s ("frequent yawning")
+    yawn_hold_s: float = 60.0  # ... and the last yawn no longer ago than this (frequent AND current)
+    moderate_yawns: int = 0  # 0 = yawning alone never makes "moderately drowsy"
+    yawns_plus_eyes_moderate: bool = True  # frequent yawning AND a slight eye sign -> moderately drowsy
+    blink_rate_slight_per_min: float = 0.0  # 0 = off; frequent blinking needs validation data first
+    recovery_s: float = 20.0  # step down one level after this long with no new eye sign
+    state_scores: List[float] = field(default_factory=lambda: [0.0, 0.45, 0.75])  # alert / slightly / moderately -> severity
+
+
 # --------------------------------------------------------------------------
 # Stage 4 - severity grading
 # --------------------------------------------------------------------------
@@ -198,10 +264,10 @@ class SeverityConfig:
     table places 0.34 and 0.66 at the intended limits, for example:
       gaze_s     2.0 s away   -> 0.34 (MODERATE)  3.0 s -> 0.66 (SEVERE)
       phone_s    < 3 s        -> <= 0.30          3.0 s -> 0.70 (SEVERE)
-      perclos    8 %          -> 0.34             15 %  -> 0.66
+    PERCLOS no longer has its own table: it enters through the drowsiness
+    state (section ``drowsiness``: 8 % slightly, 15 % moderately drowsy).
     """
 
-    perclos: Anchors = field(default_factory=lambda: [[0.0, 0.0], [0.04, 0.0], [0.08, 0.34], [0.15, 0.66], [0.25, 1.0]])
     closure_s: Anchors = field(default_factory=lambda: [[0.0, 0.0], [0.4, 0.0], [0.8, 0.34], [1.5, 0.66], [2.0, 0.9], [3.0, 1.0]])
     yawn_count: Anchors = field(default_factory=lambda: [[0.0, 0.0], [1.0, 0.4], [2.0, 0.5], [3.0, 0.7], [4.0, 0.9]])
     gaze_s: Anchors = field(default_factory=lambda: [[0.0, 0.0], [1.0, 0.0], [2.0, 0.34], [3.0, 0.66], [4.0, 0.9], [5.0, 1.0]])
@@ -223,25 +289,48 @@ class ContextConfig:
     # continuous driving: >= 1 h Moderate, >= 2 h High
     driving_hours: Anchors = field(default_factory=lambda: [[0.0, 0.0], [1.0, 0.34], [2.0, 0.66], [3.0, 1.0]])
     # When GPS speed is unavailable the vehicle is assumed to be moving, so a
-    # missing sensor can never suppress an alert.
+    # missing sensor can never suppress an alert. The assumption is flagged in
+    # every context reading (speed_source = "assumed") - never silent.
     assumed_speed_kmh: float = 40.0
+    gps_stale_s: float = 3.0  # a fix older than this (3 missed 1-Hz updates) is not used
+    moving_speed_kmh: float = 5.0  # below this the vehicle counts as stopped (driving-duration clock pauses)
+    break_reset_s: float = 900.0  # a stop this long (15 min) resets the continuous-driving duration
+    sudden_motion_score: float = 0.65  # context motion score (0..1) treated as an ongoing "sudden motion" event
 
 
 @dataclass
 class RiskConfig:
     tier_bounds: List[float] = field(default_factory=lambda: [25.0, 52.5, 77.5])  # R -> LOW / MEDIUM / HIGH
+    tier_hysteresis: float = 5.0  # a tier is left only when R falls this far below its lower bound
     resolution: int = 201  # samples on each output universe for centroid defuzzification
 
 
 @dataclass
 class AlertConfig:
-    release_s: float = 3.0  # tier must stay lower this long before the alarm de-escalates
-    min_interval_s: float = 5.0  # minimum gap between re-triggered LOW alarms
+    """Alert state machine (SO5). See dms/alerts/state_machine.py for the full policy.
+
+    An alert SOUNDS only while a behaviour is actually happening (eyes closed,
+    yawning, looking away, phone, sudden motion) or shortly after it. When the
+    driver is back to normal for ``clear_s`` the alert stops with an explicit
+    STOP command, even if the assessed risk level is still elevated by recent
+    history (PERCLOS, yawn count, off-road time). It sounds again only for a
+    new behaviour or a higher risk tier.
+    """
+
+    activate_s: float = 0.3  # the risk tier must hold this long before an alert starts (filters spikes)
+    clear_s: float = 2.0  # driver back to normal this long -> the alert stops
+    min_alert_s: float = 2.0  # an alert lasts at least this long once started
+    release_s: float = 3.0  # risk tier must stay lower this long before the alert steps down a tier
+    min_interval_s: float = 5.0  # minimum gap between LOW soft beeps
     medium_repeat_s: float = 2.0  # repeating buzzer period
-    medium_max_repeats: int = 5  # a MEDIUM burst stops after this many buzzes until a new event (0 = no limit)
+    medium_max_repeats: int = 3  # MEDIUM burst: buzzes per trigger when no behaviour keeps it going (0 = no minimum)
     high_repeat_s: float = 1.0  # repeated alarm period
-    high_max_repeats: int = 0  # HIGH keeps sounding while the risk stays HIGH
-    push_interval_s: float = 60.0  # at most one push notification per minute
+    high_max_repeats: int = 0  # HIGH burst: alarms per trigger when no behaviour keeps it going (0 = no minimum)
+    push_interval_s: float = 60.0  # at most one push notification per this many seconds
+    reminder_s: float = 0.0  # >0: re-alert while the risk stays >= MEDIUM without new events (0 = off)
+    escalate_closure_s: float = 0.0  # >0: eyes closed this long during an alert -> HIGH + push (0 = off)
+    keepalive_s: float = 1.0  # repeat the current buzzer mode this often (device stops if keepalives stop)
+    camera_timeout_s: float = 3.0  # no frame this long -> "monitoring unavailable" (alarm stops, downtime starts)
 
 
 @dataclass
@@ -249,10 +338,13 @@ class Config:
     face: FaceModelConfig = field(default_factory=FaceModelConfig)
     detector: ObjectDetectorConfig = field(default_factory=ObjectDetectorConfig)
     eye_model: EyeStateModelConfig = field(default_factory=EyeStateModelConfig)
+    fusion: FusionModelConfig = field(default_factory=FusionModelConfig)
     evidence: EvidenceWeights = field(default_factory=EvidenceWeights)
     thresholds: ThresholdConfig = field(default_factory=ThresholdConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
+    drowsiness: DrowsinessConfig = field(default_factory=DrowsinessConfig)
     severity: SeverityConfig = field(default_factory=SeverityConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
@@ -263,19 +355,23 @@ class Config:
 
 
 EYE_MODES = {
-    "fused": {"eye_ear": 0.5, "eye_blendshape": 0.5, "eye_cnn": 0.5, "eye_yolo": 0.5},
-    "ear": {"eye_ear": 1.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.0},
-    "blendshape": {"eye_ear": 0.0, "eye_blendshape": 1.0, "eye_cnn": 0.0, "eye_yolo": 0.0},
-    "cnn": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 1.0, "eye_yolo": 0.0},
-    "yolo": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 1.0},
-    "ear+yolo": {"eye_ear": 0.5, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.5},
+    "fused": {"eye_ear": 0.5, "eye_blendshape": 0.5, "eye_cnn": 0.5, "eye_yolo": 0.5, "eye_fusion": 0.5},
+    "rules": {"eye_ear": 0.5, "eye_blendshape": 0.5, "eye_cnn": 0.5, "eye_yolo": 0.5, "eye_fusion": 0.0},
+    "ear": {"eye_ear": 1.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.0, "eye_fusion": 0.0},
+    "blendshape": {"eye_ear": 0.0, "eye_blendshape": 1.0, "eye_cnn": 0.0, "eye_yolo": 0.0, "eye_fusion": 0.0},
+    "cnn": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 1.0, "eye_yolo": 0.0, "eye_fusion": 0.0},
+    "yolo": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 1.0, "eye_fusion": 0.0},
+    "ear+yolo": {"eye_ear": 0.5, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.5, "eye_fusion": 0.0},
+    "fusion": {"eye_ear": 0.0, "eye_blendshape": 0.0, "eye_cnn": 0.0, "eye_yolo": 0.0, "eye_fusion": 1.0},
 }
 MOUTH_MODES = {
-    "fused": {"mouth_mar": 0.5, "mouth_blendshape": 0.5, "mouth_yolo": 0.5},
-    "mar": {"mouth_mar": 1.0, "mouth_blendshape": 0.0, "mouth_yolo": 0.0},
-    "blendshape": {"mouth_mar": 0.0, "mouth_blendshape": 1.0, "mouth_yolo": 0.0},
-    "yolo": {"mouth_mar": 0.0, "mouth_blendshape": 0.0, "mouth_yolo": 1.0},
-    "mar+yolo": {"mouth_mar": 0.5, "mouth_blendshape": 0.0, "mouth_yolo": 0.5},
+    "fused": {"mouth_mar": 0.5, "mouth_blendshape": 0.5, "mouth_yolo": 0.5, "mouth_fusion": 0.5},
+    "rules": {"mouth_mar": 0.5, "mouth_blendshape": 0.5, "mouth_yolo": 0.5, "mouth_fusion": 0.0},
+    "mar": {"mouth_mar": 1.0, "mouth_blendshape": 0.0, "mouth_yolo": 0.0, "mouth_fusion": 0.0},
+    "blendshape": {"mouth_mar": 0.0, "mouth_blendshape": 1.0, "mouth_yolo": 0.0, "mouth_fusion": 0.0},
+    "yolo": {"mouth_mar": 0.0, "mouth_blendshape": 0.0, "mouth_yolo": 1.0, "mouth_fusion": 0.0},
+    "mar+yolo": {"mouth_mar": 0.5, "mouth_blendshape": 0.0, "mouth_yolo": 0.5, "mouth_fusion": 0.0},
+    "fusion": {"mouth_mar": 0.0, "mouth_blendshape": 0.0, "mouth_yolo": 0.0, "mouth_fusion": 1.0},
 }
 
 
@@ -288,10 +384,22 @@ def apply_evidence_modes(cfg: "Config", eye_mode: Optional[str] = None, mouth_mo
     return cfg
 
 
+# Keys that existed in older versions: still accepted (and ignored) so that old
+# copies of configs/default.yaml keep loading. Value = what replaced them.
+DEPRECATED_KEYS = {
+    "temporal.perclos_window_s": "drowsiness.window_s",
+    "temporal.perclos_min_coverage_s": "drowsiness.perclos_min_coverage_s",
+    "severity.perclos": "drowsiness.slight_perclos / moderate_perclos",
+}
+
+
 def _merge(obj: Any, overrides: dict, path: str = "") -> None:
     """Recursively apply ``overrides`` onto dataclass ``obj`` (unknown keys are errors)."""
     known = {f.name: f for f in dataclasses.fields(obj)}
     for key, value in overrides.items():
+        if f"{path}{key}" in DEPRECATED_KEYS and key not in known:
+            print(f"[config] '{path}{key}' is no longer used (see {DEPRECATED_KEYS[path + key]})")
+            continue
         if key not in known:
             raise KeyError(f"Unknown config key '{path}{key}'. Valid keys: {sorted(known)}")
         current = getattr(obj, key)

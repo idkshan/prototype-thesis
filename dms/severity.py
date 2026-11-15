@@ -1,9 +1,16 @@
-"""Stage 4: severity grading per behaviour.
+"""Stage 4: severity grading per behaviour (input of the fuzzy risk model).
 
 Each behaviour receives a continuous severity score in [0, 1] (the crisp input
 of the fuzzy system) and a linguistic level for explanation. Scores come from
 piecewise-linear anchor tables in the config, e.g. for gaze deviation
-2 s away -> 0.5 (Moderate) and 3 s away -> 0.85 (High).
+2 s away -> 0.34 (Moderate) and 3 s away -> 0.66 (High).
+
+    drowsiness  max(closure length table, eye drowsiness level)
+                eye level: alert 0, slightly 0.45, moderately 0.75
+                (drowsiness.state_scores; PERCLOS enters through this level)
+    yawning     yawns in the last 5 min (1 yawn -> 0.4 = one yawn is LOW risk)
+    gaze        max(continuous time away, share of the last 30 s off the road)
+    phone       continuous time with a phone (>= 3 s -> 0.7, confirmed use)
 
 The level is the fuzzy term (Table 1.7) with the highest membership:
     NONE      score < 0.10
@@ -14,7 +21,7 @@ The level is the fuzzy term (Table 1.7) with the highest membership:
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -22,7 +29,7 @@ from .config import SeverityConfig
 from .types import BehaviorStatus, Severity, SeverityReport
 
 MILD_AT, MODERATE_AT, SEVERE_AT = 0.10, 1.0 / 3.0, 0.65
-DROWSY_DETECTED_AT = 0.5  # drowsiness is "detected" (SO3) from Moderate severity upward
+EYE_LEVEL_NAMES = ("alert", "slightly drowsy", "moderately drowsy")
 
 
 def piecewise(anchors: Sequence[Sequence[float]], x: float) -> float:
@@ -46,17 +53,19 @@ def _sev(score: float, reason: str) -> Severity:
 
 
 class SeverityGrader:
-    def __init__(self, cfg: SeverityConfig):
+    def __init__(self, cfg: SeverityConfig, state_scores: Optional[Sequence[float]] = None):
         self.cfg = cfg
+        self.state_scores = list(state_scores) if state_scores is not None else [0.0, 0.45, 0.75]
 
     def grade(self, b: BehaviorStatus) -> SeverityReport:
         c = self.cfg
         closure = piecewise(c.closure_s, b.closure_s)
-        perclos = piecewise(c.perclos, b.perclos) if b.perclos is not None else 0.0
-        if closure >= perclos:
+        eye_state = self.state_scores[min(max(b.eye_level, 0), len(self.state_scores) - 1)]
+        if closure >= eye_state:
             drowsy = _sev(closure, f"eye closure {b.closure_s:.1f}s")
         else:
-            drowsy = _sev(perclos, f"PERCLOS {100 * (b.perclos or 0):.0f}%")
+            perclos = f", PERCLOS {100 * b.perclos:.0f}%" if b.perclos is not None else ""
+            drowsy = _sev(eye_state, f"eyes {EYE_LEVEL_NAMES[b.eye_level]} ({b.long_closures} long closures{perclos})")
 
         yawn = _sev(piecewise(c.yawn_count, b.yawns_in_window), f"{b.yawns_in_window} yawn(s) in window")
 

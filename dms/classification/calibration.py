@@ -35,6 +35,8 @@ class Baseline:
     pitch: float
     blink: float
     jaw: float
+    ear_left: Optional[float] = None  # per-eye open-eye EAR (None = use the mean ``ear``)
+    ear_right: Optional[float] = None
 
 
 @dataclass
@@ -51,6 +53,7 @@ class Thresholds:
     pitch_up_limit: float
     decision_level: float
     calibrated: bool
+    ear_closed_ratio: float = 0.70  # per-eye thresholds are baseline_eye x this ratio
 
     @classmethod
     def from_baseline(cls, b: Baseline, cfg: ThresholdConfig, calibrated: bool) -> "Thresholds":
@@ -66,6 +69,7 @@ class Thresholds:
             pitch_up_limit=cfg.pitch_up_deg * pose_scale,
             decision_level=cfg.decision_level,
             calibrated=calibrated,
+            ear_closed_ratio=cfg.ear_closed_ratio,
         )
 
 
@@ -82,9 +86,11 @@ def _robust_std(values: np.ndarray) -> float:
 
 
 class DriverCalibrator:
-    def __init__(self, cfg: CalibrationConfig, thr_cfg: ThresholdConfig):
+    def __init__(self, cfg: CalibrationConfig, thr_cfg: ThresholdConfig, phone_conf_limit: float = 0.35):
         self.cfg = cfg
         self.thr_cfg = thr_cfg
+        self.phone_conf_limit = phone_conf_limit  # frames with a confident phone box are not used
+        self.warning = ""  # e.g. camera far off the face axis (calibration still accepted)
         d = cfg.defaults
         self.default_baseline = Baseline(d.ear, d.mar, d.yaw, d.pitch, d.blink, d.jaw)
         self.baseline = replace(self.default_baseline)
@@ -125,7 +131,7 @@ class DriverCalibrator:
             and feats.ear is not None
             and feats.mar is not None
             and feats.yaw is not None
-            and feats.phone_conf == 0.0
+            and feats.phone_conf < self.phone_conf_limit
         )
         if usable:
             self._samples.append(feats)
@@ -149,6 +155,9 @@ class DriverCalibrator:
             return cur if x is None else float(min(hi, max(lo, cur + a * (x - cur))))
 
         b.ear = step(b.ear, feats.ear, anc.ear * (1 - c.max_ear_drift), anc.ear * (1 + c.max_ear_drift))
+        if anc.ear_left and anc.ear_right:
+            b.ear_left = step(b.ear_left, feats.ear_left, anc.ear_left * (1 - c.max_ear_drift), anc.ear_left * (1 + c.max_ear_drift))
+            b.ear_right = step(b.ear_right, feats.ear_right, anc.ear_right * (1 - c.max_ear_drift), anc.ear_right * (1 + c.max_ear_drift))
         b.mar = step(b.mar, feats.mar, max(0.0, anc.mar - c.max_mar_drift), anc.mar + c.max_mar_drift)
         b.yaw = step(b.yaw, feats.yaw, anc.yaw - c.max_pose_drift_deg, anc.yaw + c.max_pose_drift_deg)
         b.pitch = step(b.pitch, feats.pitch, anc.pitch - c.max_pose_drift_deg, anc.pitch + c.max_pose_drift_deg)
@@ -170,6 +179,7 @@ class DriverCalibrator:
         arr = lambda name: np.array([getattr(s, name) for s in samples if getattr(s, name) is not None], dtype=float)
         ear, mar, yaw, pitch = arr("ear"), arr("mar"), arr("yaw"), arr("pitch")
         blink, jaw = arr("blink"), arr("jaw_open")
+        ear_l, ear_r = arr("ear_left"), arr("ear_right")
         med = lambda a, default: float(np.median(a)) if a.size else default
         candidate = Baseline(
             ear=med(ear, self.default_baseline.ear),
@@ -178,6 +188,8 @@ class DriverCalibrator:
             pitch=med(pitch, 0.0),
             blink=med(blink, self.default_baseline.blink),
             jaw=med(jaw, self.default_baseline.jaw),
+            ear_left=med(ear_l, None) if ear_l.size else None,
+            ear_right=med(ear_r, None) if ear_r.size else None,
         )
         pose_std = max(_robust_std(yaw), _robust_std(pitch))
         problems = []
@@ -196,4 +208,8 @@ class DriverCalibrator:
         self.anchor = replace(candidate)
         self.status = CALIBRATED
         self.last_failure = ""
+        offset = float(np.hypot(candidate.yaw, candidate.pitch))
+        self.warning = (f"camera is {offset:.0f} deg off the driver's face axis (limit {self.cfg.max_camera_offset_deg:.0f}): "
+                        "eye/mouth measurements are unreliable - mount the camera in front of the driver"
+                        if offset > self.cfg.max_camera_offset_deg else "")
         self._thresholds = Thresholds.from_baseline(self.baseline, self.thr_cfg, calibrated=True)

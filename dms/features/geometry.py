@@ -31,6 +31,11 @@ def eye_aspect_ratio(pts: np.ndarray, idx: Sequence[int] = RIGHT_EYE_EAR) -> flo
     return (_dist(p2, p6) + _dist(p3, p5)) / (2.0 * horizontal)
 
 
+def eye_width(pts: np.ndarray, idx: Sequence[int] = RIGHT_EYE_EAR) -> float:
+    """Eye-corner distance |p1 - p4| in pixels: how large the eye is in the image."""
+    return _dist(pts[idx[0], :2], pts[idx[3], :2])
+
+
 def mouth_aspect_ratio(pts: np.ndarray, idx: Sequence[int] = MOUTH_MAR) -> float:
     q1, q2, q3, q4, q5, q6, q7, q8 = (pts[i, :2] for i in idx)
     horizontal = _dist(q1, q5)

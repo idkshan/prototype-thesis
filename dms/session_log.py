@@ -22,7 +22,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from .types import FrameResult
+from . import __version__
+from .types import AlertCommand, FrameResult
 
 
 def _round(v, d=4):
@@ -31,6 +32,24 @@ def _round(v, d=4):
     if isinstance(v, dict):
         return {k: _round(x, d) for k, x in v.items()}
     return v
+
+
+def decision_record(t: float, out) -> dict:
+    """The Stage 3-5 part of a frame record (shared by the live logger and replay).
+
+    ``out`` is a FrameResult or an EngineOutput - both carry behavior,
+    severity, risk and active_tier.
+    """
+    r = out.risk
+    return {
+        "t": round(t, 4),
+        "behavior": _round({k: v for k, v in asdict(out.behavior).items()}),
+        "severity": {k: {"score": s.score, "level": s.level} for k, s in out.severity.as_dict().items()},
+        "risk": {"F": r.fatigue, "D": r.distraction, "C": r.context, "R": r.risk, "tier": r.tier,
+                 "raw_tier": r.raw_tier, "fatigue_level": r.fatigue_level},
+        "active_tier": out.active_tier,
+        "alert_state": getattr(out, "alert_state", None),
+    }
 
 
 class SessionLogger:
@@ -48,7 +67,9 @@ class SessionLogger:
         self._wall0 = time.monotonic()
         self._alert_count = 0
         self._episodes = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
-        self._flag_frames = {"drowsy": 0, "yawning": 0, "gaze_deviation": 0, "phone_usage": 0}
+        self._alert_events: Dict[str, int] = {}
+        self._flag_frames = {"drowsy": 0, "eye_closure": 0, "yawning": 0, "gaze_deviation": 0, "phone_usage": 0}
+        self._states: Dict[str, int] = {}
         self._face_frames = 0
         self._last_result: Optional[FrameResult] = None
 
@@ -77,24 +98,27 @@ class SessionLogger:
                 "pose_evidence": _round(r.states.pose_evidence),
                 "phone_visible": r.states.phone_visible,
             },
-            "behavior": _round({k: v for k, v in asdict(b).items()}),
-            "severity": {k: {"score": s.score, "level": s.level} for k, s in r.severity.as_dict().items()},
-            "risk": {"F": r.risk.fatigue, "D": r.risk.distraction, "C": r.risk.context, "R": r.risk.risk, "tier": r.risk.tier,
-                     "drowsiness_level": r.risk.fatigue_level},
+            **{k: v for k, v in decision_record(r.t, r).items() if k != "t"},
             "context": _round(asdict(r.context)) if r.context is not None else None,
-            "active_tier": r.active_tier,
             "calibration": r.calibration_status,
             "timings_ms": _round(r.timings_ms, 2),
         }
         self._frames.write(json.dumps(rec) + "\n")
-        for a in r.alerts:
+        self.log_alerts(r.alerts)
+        self._states[r.behavior.drowsiness_state] = self._states.get(r.behavior.drowsiness_state, 0) + 1
+        self._last_result = r
+
+    def log_alerts(self, alerts: List[AlertCommand]) -> None:
+        """Alert commands (also those sent without a frame, e.g. camera lost)."""
+        for a in alerts:
             self._alert_count += 1
+            self._alert_events[a.event] = self._alert_events.get(a.event, 0) + 1
             if a.new_episode:
                 self._episodes[a.tier] += 1
             self._alerts.write(json.dumps(asdict(a)) + "\n")
-        self._last_result = r
+            self._alerts.flush()
 
-    def close(self, calibration: Optional[dict] = None) -> dict:
+    def close(self, calibration: Optional[dict] = None, extra: Optional[dict] = None) -> dict:
         self._frames.close()
         self._alerts.close()
         duration = (self._last_t - self._first_t) if self._first_t is not None else 0.0
@@ -105,6 +129,7 @@ class SessionLogger:
             stats[k] = {"mean": round(float(a.mean()), 2), "median": round(float(np.median(a)), 2), "p95": round(float(np.percentile(a, 95)), 2)}
         total = self._timings.get("total_ms")
         summary = {
+            "code_version": __version__,
             **self.meta,
             "frames": self._n,
             "video_duration_s": round(duration, 2),
@@ -116,9 +141,12 @@ class SessionLogger:
             "alert_commands": self._alert_count,
             "alert_episodes": self._episodes,
             "alert_episodes_per_hour": round(sum(self._episodes.values()) / (duration / 3600.0), 2) if duration > 0 else None,
+            "alert_events": self._alert_events,
+            "drowsiness_state_frames": self._states,
             "behavior_flag_frames": self._flag_frames,
             "calibration": calibration,
+            **(extra or {}),
         }
         with open(self.dir / "summary.json", "w", encoding="utf-8") as fh:
-            json.dump(summary, fh, indent=2)
+            json.dump(summary, fh, indent=2, default=str)
         return summary
