@@ -1,0 +1,29 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "roles": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "demo": {
+      "drivers": {
+        "driver1": {
+          ".read": "auth != null && (root.child('roles').child(auth.uid).val() === 'driver' || root.child('roles').child(auth.uid).val() === 'supervisor')",
+          ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'driver'",
+          "events": {
+            ".indexOn": ["timestampMs"]
+          }
+        }
+      }
+    },
+    "supervisorTokens": {
+      "$uid": {
+        ".read": false,
+        ".write": "auth != null && auth.uid === $uid && root.child('roles').child(auth.uid).val() === 'supervisor'"
+      }
+    }
+  }
+}
