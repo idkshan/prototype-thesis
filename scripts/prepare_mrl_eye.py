@@ -24,6 +24,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
+from dms.data.splits import group_split, write_split_manifest
 
 
 def main() -> int:
@@ -47,15 +48,12 @@ def main() -> int:
     if not subjects:
         print("No MRL images found.")
         return 1
-    rng.shuffle(subjects)
+    split_of = group_split(subjects, args.split, args.seed)
     n = len(subjects)
-    cut1, cut2 = int(n * args.split[0]), int(n * (args.split[0] + args.split[1]))
-    if n >= 3:  # keep at least one group in every split
-        cut1 = min(max(cut1, 1), n - 2)
-        cut2 = min(max(cut2, cut1 + 1), n - 1)
     counts = defaultdict(lambda: defaultdict(int))
-    for i, s in enumerate(subjects):
-        split = "train" if i < cut1 else "val" if i < cut2 else "test"
+    manifest = []
+    for s in subjects:
+        split = split_of[s]
         files = by_subject[s]
         if args.max_per_subject:
             rng.shuffle(files)
@@ -70,9 +68,12 @@ def main() -> int:
             else:
                 shutil.copy2(p, dest)
             counts[split][label] += 1
+        manifest.append({"source": s, "group": s, "split": split, "images": len(files)})
+    write_split_manifest(Path(args.out) / "split_manifest.csv", manifest)
     for split in ("train", "val", "test"):
         print(f"{split:5s}: open={counts[split]['open']:6d} closed={counts[split]['closed']:6d}")
-    print(f"{n} subjects -> {args.out}")
+    print(f"{n} subjects -> {args.out} (split by subject; manifest: {Path(args.out) / 'split_manifest.csv'})")
+    print("Domain note: MRL crops are near-infrared greyscale; check your camera's eye crops with scripts/dump_eye_crops.py.")
     return 0
 
 

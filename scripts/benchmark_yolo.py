@@ -66,15 +66,23 @@ def load_split(data_yaml: str, split: str) -> Tuple[List[Path], Dict[int, str]]:
     root = Path(d.get("path") or Path(data_yaml).parent)
     if not root.is_absolute():
         root = (Path(data_yaml).parent / root).resolve()
-    entry = d.get(split) or d.get("val")
+    entry = d.get(split)
+    if entry is None:
+        raise SystemExit(f"{data_yaml} has no '{split}:' entry (available: {[k for k in ('train', 'val', 'test') if k in d]})")
     entries = entry if isinstance(entry, list) else [entry]
     images: List[Path] = []
     for e in entries:
         p = Path(e) if Path(e).is_absolute() else root / e
+        if not p.exists() and not Path(e).is_absolute():
+            # Roboflow exports write "../test/images" although the folder sits next to data.yaml
+            alt = Path(data_yaml).parent / str(e).replace("\\", "/").lstrip("./")
+            p = alt if alt.exists() else p
         if p.is_dir():
             images += sorted(q for q in p.rglob("*") if q.suffix.lower() in IMG_EXTS)
         elif p.suffix == ".txt":
             images += [Path(line.strip()) if Path(line.strip()).is_absolute() else root / line.strip() for line in p.read_text().splitlines() if line.strip()]
+    if not images:
+        raise SystemExit(f"No images found for split '{split}' of {data_yaml} (looked in {entries}). Check the paths in data.yaml.")
     names = d["names"]
     names = {i: n for i, n in enumerate(names)} if isinstance(names, list) else {int(k): v for k, v in names.items()}
     return images, names

@@ -30,3 +30,13 @@ def test_overrides_and_modes():
     apply_evidence_modes(cfg, "ear", "blendshape")
     assert cfg.evidence.eye_blendshape == 0.0 and cfg.evidence.eye_ear == 1.0
     assert cfg.evidence.mouth_mar == 0.0 and cfg.evidence.mouth_blendshape == 1.0
+
+
+def test_old_config_copies_still_load(tmp_path, capsys):
+    """Keys retired in version 3 are accepted (and ignored with a message), so copies of the old default.yaml keep working."""
+    p = tmp_path / "old.yaml"
+    p.write_text("temporal:\n  perclos_window_s: 60.0\n  perclos_min_coverage_s: 30.0\n"
+                 "severity:\n  perclos: [[0.0, 0.0], [0.25, 1.0]]\nalerts:\n  release_s: 3.0\n")
+    cfg = load_config(p)
+    assert cfg.alerts.release_s == 3.0
+    assert "no longer used" in capsys.readouterr().out

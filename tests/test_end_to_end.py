@@ -1,8 +1,10 @@
 """Full pipeline with the real neural networks (skipped if models are not downloaded).
 
 Uses the sample photo bundled with the ultralytics package: 8 s of the face
-(calibration), 3.5 s with the face gone (head turned far away), then the face
-again. Expected: calibration succeeds and the face loss escalates to HIGH.
+(calibration), 3.5 s of a blank frame (camera covered while the driver faced
+forward), then the face again. Expected: calibration succeeds, and the blank
+frames are reported as "face lost" (unknown) - not as gaze deviation or
+drowsiness, so no alarm sounds.
 """
 
 import os
@@ -53,6 +55,9 @@ def test_full_pipeline_on_real_face():
     assert first.features.blink is not None and first.features.jaw_open is not None  # learned blendshapes present
     assert results[79].calibration_status == "CALIBRATED"
     tiers = [r.active_tier for r in results]
-    assert "HIGH" in tiers[100:120]
-    assert all(t == "NONE" for t in tiers[:80])  # no alarms while the driver faces forward
+    assert all(t == "NONE" for t in tiers)  # no alarm while facing forward, none for the covered camera
+    assert results[100].states.face_status == "lost" and not results[100].behavior.data_valid
+    assert results[100].states.eyes_not_judged == "no_face"
+    assert results[140].states.face_status == "ok"
+    assert results[60].features.eye_width_px > 12  # eyes large enough to be judged
     assert "total_ms" in results[-1].timings_ms

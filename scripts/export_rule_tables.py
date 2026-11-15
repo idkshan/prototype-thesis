@@ -24,11 +24,11 @@ OUTPUT_NAMES = {"fatigue": "F", "distraction": "D", "context": "C", "overall": "
 
 
 def onset_table(cfg) -> str:
-    grader, model = SeverityGrader(cfg.severity), DriverRiskModel(cfg)
+    grader = SeverityGrader(cfg.severity, cfg.drowsiness.state_scores)
     ctx = ContextReading(speed_kmh=40.0, motion_g=0.0, driving_s=0.0)
     scans = [
         ("Eye closure (continuous)", "closure_s", np.arange(0, 3.001, 0.05), "s"),
-        ("PERCLOS (60 s window)", "perclos", np.arange(0, 0.3001, 0.0025), "ratio"),
+        ("Eye drowsiness level (1 = slightly, 2 = moderately; PERCLOS 8 % / 15 %)", "eye_level", np.arange(0, 3), "count"),
         ("Yawns in 5 min", "yawns_in_window", np.arange(0, 5), "count"),
         ("Looking away (continuous)", "gaze_away_s", np.arange(0, 5.001, 0.05), "s"),
         ("Eyes-off-road share (30 s)", "offroad_ratio", np.arange(0, 0.6001, 0.005), "ratio"),
@@ -36,6 +36,7 @@ def onset_table(cfg) -> str:
     ]
     rows = ["| Behaviour (alone) | Severity MODERATE from | LOW tier from | MEDIUM tier from | HIGH tier from |", "|---|---|---|---|---|"]
     for label, attr, values, unit in scans:
+        model = DriverRiskModel(cfg)  # fresh model: the risk tier has hysteresis (memory)
         first = {}
         for v in values:
             sev = grader.grade(BehaviorStatus(**{attr: int(v) if unit == "count" else float(v)}))
@@ -44,6 +45,7 @@ def onset_table(cfg) -> str:
         rows.append(f"| {label} | " + " | ".join(_fmt(first.get(k), unit) for k in ("MODERATE", "LOW", "MEDIUM", "HIGH")) + " |")
 
     first = {}
+    model = DriverRiskModel(cfg)
     for g in np.arange(0, 0.8001, 0.01):
         _record_tiers(first, model.assess(grader.grade(BehaviorStatus()), ContextReading(40.0, float(g), 0.0)).tier, g)
     rows.append("| Erratic motion (alert driver) | - | " + " | ".join(_fmt(first.get(k), "g") for k in ("LOW", "MEDIUM", "HIGH")) + " |")

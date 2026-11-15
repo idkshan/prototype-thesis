@@ -2,8 +2,9 @@
 
 The participants are NOT used for training: the YOLO models are trained on the
 approved public datasets only. The participant sessions are split by person:
-  * validation - used to tune the thresholds / persistence times (configs/*.yaml)
-  * test       - touched once, with the final config, for the reported results
+  * validation - used to tune thresholds / persistence times (configs/*.yaml,
+                 scripts/tune_thresholds.py)
+  * test       - touched once, with the frozen config, for the reported results
 
 Manifest (CSV, one row per recorded session):
     participant,session,labels,split,condition
@@ -11,35 +12,32 @@ Manifest (CSV, one row per recorded session):
     P01,P01_night,labels/P01_night.csv,validation,night
     P02,P02_day,labels/P02_day.csv,test,day
   * session   - folder name under --sessions (written by process_videos.py) or a path
-  * labels    - ground-truth CSV (evaluate_behaviors.py format); relative paths are
-                read from the manifest's folder
+  * labels    - ground-truth CSV (relative paths are read from the manifest's folder)
   * split     - validation or test (a participant must stay in ONE split)
   * condition - free text used for grouping, e.g. day / night (optional)
 
 Examples
 --------
     # tune on the validation split (replay = re-run Stages 3-5 with this config)
-    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split validation \
-        --replay --config configs/tuned.yaml --tag tuned
+    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split validation --config configs/tuned.yaml --tag tuned
 
     # final, reported numbers: the test split, once
-    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split test --replay --config configs/tuned.yaml --tag final
+    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split test --config configs/tuned.yaml --tag final
 
     # ablation on the test split: AI only vs thresholds only vs both
-    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split test --replay --eye-mode yolo --mouth-mode yolo --tag ai_only
+    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split test --eye-mode yolo --mouth-mode yolo --tag ai_only
+
+    # baseline (decisions logged while recording) vs this version (replay), same sessions
+    python scripts/evaluate_study.py --manifest data/study/manifest.csv --split validation --compare --tag compare
 
 Results go to results/study_eval/<tag>/: per_session.csv, summary.csv,
-summary.md (thesis-ready tables) and report.json.
-
-Pooled metrics add up the TP/FP/FN of every session before computing P/R/F1
-(each event counts once); per-participant mean +/- SD of the event F1 shows the
-spread between drivers.
+summary.md (thesis-ready tables) and report.json. Pooled metrics add up
+TP/FP/FN (and confusion matrices) over sessions before computing P/R/F1.
 """
 
 import argparse
 import csv
 import json
-import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -47,8 +45,8 @@ from typing import Dict, List
 
 import _bootstrap  # noqa: F401
 from dms.config import EYE_MODES, MOUTH_MODES, apply_evidence_modes, load_config
-from dms.types import BEHAVIORS
-from evaluate_behaviors import TARGET_F1, evaluate_session, prf
+from dms.evaluation.labels import load_labels
+from dms.evaluation.session import FLAG_OF, evaluate_session, load_jsonl, markdown, pool
 
 SPLITS = ("validation", "test")
 
@@ -89,86 +87,55 @@ def load_manifest(path: Path, sessions_dir: Path) -> List[dict]:
     return rows
 
 
-def pooled(reports: List[dict], participants: List[str]) -> Dict[str, dict]:
-    """Aggregate a list of evaluate_session() reports."""
-    out = {}
-    hours = sum(r["alarms"]["duration_h"] for r in reports)
-    for b in BEHAVIORS:
-        f = {k: sum(r["behaviors"][b]["frame"][k] for r in reports) for k in ("tp", "fp", "fn")}
-        e = {k: sum(r["behaviors"][b]["event"][k] for r in reports) for k in ("tp", "fp", "fn")}
-        fp_, fr_, ff_ = prf(f["tp"], f["fp"], f["fn"])
-        ep, er, ef = prf(e["tp"], e["fp"], e["fn"])
-        delays = [d for r in reports for d in r["behaviors"][b]["event"].get("delays_s", [])]
-        per_person = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
-        for r, p in zip(reports, participants):
-            for k in ("tp", "fp", "fn"):
-                per_person[p][k] += r["behaviors"][b]["event"][k]
-        f1s = [prf(c["tp"], c["fp"], c["fn"])[2] for c in per_person.values() if c["tp"] + c["fn"] > 0]
-        out[b] = {
-            "gt_events": e["tp"] + e["fn"], "detected": e["tp"], "false_events": e["fp"],
-            "event_precision": round(ep, 4), "event_recall": round(er, 4), "event_f1": round(ef, 4),
-            "frame_precision": round(fp_, 4), "frame_recall": round(fr_, 4), "frame_f1": round(ff_, 4),
-            "participant_f1_mean": round(statistics.mean(f1s), 4) if f1s else None,
-            "participant_f1_sd": round(statistics.stdev(f1s), 4) if len(f1s) > 1 else None,
-            "median_delay_s": round(statistics.median(delays), 2) if delays else None,
-            "false_events_per_hour": round(e["fp"] / hours, 3) if hours > 0 else None,
-            "target_f1": TARGET_F1[b],
-            "meets_target": (ef >= TARGET_F1[b]) if e["tp"] + e["fn"] > 0 else None,
-        }
-    unnecessary = sum(r["alarms"]["unnecessary"] for r in reports)
-    out["alarms"] = {
-        "hours": round(hours, 3), "alert_episodes": sum(r["alarms"]["alert_episodes"] for r in reports),
-        "unnecessary": unnecessary, "unnecessary_per_hour": round(unnecessary / hours, 3) if hours > 0 else None,
-        "target_per_hour": 0.5,
-    }
-    matrix = [[0] * 4 for _ in range(4)]
-    for r in reports:
-        lv = r.get("drowsiness_levels") or {}
-        for i, row in enumerate(lv.get("confusion", [])):
-            for j, v in enumerate(row):
-                matrix[i][j] += v
-    n = sum(sum(row) for row in matrix)
-    if n:
-        exact = sum(matrix[i][i] for i in range(4))
-        near = sum(matrix[i][j] for i in range(4) for j in range(4) if abs(i - j) <= 1)
-        out["drowsiness_levels"] = {"segments": n, "exact_acc": round(exact / n, 4), "within_one_acc": round(near / n, 4),
-                                    "confusion": matrix}
-    return out
+def group_indices(rows: List[dict], split: str) -> Dict[str, List[int]]:
+    groups: Dict[str, List[int]] = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[f"{r['split']} - all sessions"].append(i)
+        groups[f"{r['split']} - {r['condition']}"].append(i)
+    if split == "all":
+        groups = {"all splits": list(range(len(rows))), **groups}
+    conditions = {r["condition"] for r in rows}
+    if len(conditions) == 1:  # the per-condition group would repeat "all sessions"
+        only = next(iter(conditions))
+        groups = {k: v for k, v in groups.items() if not k.endswith(f" - {only}")}
+    return dict(groups)
 
 
-def markdown(groups: Dict[str, dict], meta: dict) -> str:
-    lines = [f"# Participant study evaluation ({meta['tag']})", "",
-             f"Split: **{meta['split']}** | sessions: {meta['sessions']} | participants: {meta['participants']} | "
-             f"{'replay with ' + (meta['config'] or 'default config') if meta['replay'] else 'as recorded'}"
-             + (f" | eye mode {meta['eye_mode']}" if meta.get("eye_mode") else "")
-             + (f" | mouth mode {meta['mouth_mode']}" if meta.get("mouth_mode") else ""), ""]
-    for name, g in groups.items():
-        a = g["alarms"]
-        lines += [f"## {name}", "",
-                  f"Driving time {a['hours'] * 60:.1f} min; alert episodes {a['alert_episodes']}; "
-                  f"unnecessary alarms {a['unnecessary']} = **{a['unnecessary_per_hour']}/h** (target <= 0.5/h)", "",
-                  "| Behaviour | GT events | Detected | False | Event P | Event R | Event F1 | Target | Frame F1 | "
-                  "F1 per participant (mean ± SD) | Median delay (s) |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|"]
-        for b in BEHAVIORS:
-            r = g[b]
-            ok = "—" if r["meets_target"] is None else ("✓" if r["meets_target"] else "✗")
-            spread = "—" if r["participant_f1_mean"] is None else (
-                f"{r['participant_f1_mean']:.2f}" + (f" ± {r['participant_f1_sd']:.2f}" if r["participant_f1_sd"] is not None else ""))
-            num = (lambda k: f"{r[k]:.2f}") if r["gt_events"] else (lambda k: "—")  # no labelled events: only false events count
-            lines.append(f"| {b} | {r['gt_events']} | {r['detected']} | {r['false_events']} | {num('event_precision')} | "
-                         f"{num('event_recall')} | {num('event_f1')} | {r['target_f1']} {ok} | {num('frame_f1')} | {spread} | "
-                         f"{r['median_delay_s'] if r['median_delay_s'] is not None else '—'} |")
-        lv = g.get("drowsiness_levels")
-        if lv:
-            names = ["Alert", "Level 1", "Level 2", "Level 3"]
-            lines += ["", f"Drowsiness level (highest level reported inside each annotated segment): "
-                          f"exact {lv['exact_acc']:.2f}, within one level {lv['within_one_acc']:.2f} ({lv['segments']} segments)", "",
-                      "| Annotated \\ Reported | " + " | ".join(names) + " |", "|---|---|---|---|---|"]
-            for i in range(1, 4):
-                lines.append(f"| {names[i]} | " + " | ".join(str(v) for v in lv["confusion"][i]) + " |")
-        lines.append("")
-    return "\n".join(lines)
+def write_outputs(out: Path, rows, reports, summary, md: str, meta: dict) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "per_session.csv", "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["participant", "session", "split", "condition", "minutes", "behavior", "labelled_events", "event_tp",
+                    "event_fp", "event_fn", "event_f1", "frame_f1", "frame_fpr", "frame_fnr", "median_delay_s",
+                    "unnecessary_alarms", "non_event_minutes"])
+        for r, rep in zip(rows, reports):
+            for b, res in rep["behaviors"].items():
+                ev, fr = res["event"], res["frame"]
+                w.writerow([r["participant"], r["session"].name, r["split"], r["condition"], rep["duration_min"], b,
+                            res["labelled_events"], ev["tp"], ev["fp"], ev["fn"], ev["f1"], fr["f1"], fr["fpr"], fr["fnr"],
+                            ev["median_delay_s"], rep["alarms"]["alarms"]["unnecessary"],
+                            round(rep["alarms"]["non_event_hours"] * 60, 2)])
+    with open(out / "summary.csv", "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["group", "behavior", "primary_view", "primary_f1", "target_f1", "labelled_events", "event_precision",
+                    "event_recall", "event_f1", "frame_precision", "frame_recall", "frame_f1", "frame_fpr", "frame_fnr",
+                    "participant_f1_mean", "participant_f1_sd", "median_delay_s"])
+        for name, g in summary.items():
+            for b in FLAG_OF:
+                if b not in g:
+                    continue
+                e = g[b]
+                w.writerow([name, b, e["primary_view"], e["primary_f1"], e.get("target_f1"), e["labelled_events"],
+                            e["event"]["precision"], e["event"]["recall"], e["event"]["f1"], e["frame"]["precision"],
+                            e["frame"]["recall"], e["frame"]["f1"], e["frame"]["fpr"], e["frame"]["fnr"],
+                            e["participant_f1_mean"], e["participant_f1_sd"], e["median_delay_s"]])
+            a = g["alarms"]["alarms"]
+            w.writerow([name, "unnecessary_alarms_per_non_event_hour", "", a["per_non_event_hour"]])
+    (out / "summary.md").write_text(md, encoding="utf-8")
+    (out / "report.json").write_text(json.dumps({
+        "meta": meta, "summary": summary,
+        "sessions": [{**{k: str(v) for k, v in r.items()}, "report": rep} for r, rep in zip(rows, reports)]}, indent=2),
+        encoding="utf-8")
 
 
 def main() -> int:
@@ -176,17 +143,16 @@ def main() -> int:
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--sessions", default="results/study_sessions", help="folder with the session folders")
     ap.add_argument("--split", choices=["validation", "test", "all"], default="validation")
-    ap.add_argument("--replay", action="store_true", help="re-run Stages 3-5 on the logged features (needed to try a new config)")
-    ap.add_argument("--config", default=None, help="config for --replay")
+    ap.add_argument("--replay", action="store_true", help="re-run Stages 3-5 of this version on the logged features")
+    ap.add_argument("--compare", action="store_true", help="report as-recorded (baseline) and replay (this version)")
+    ap.add_argument("--config", default=None, help="config for the replay (implies --replay)")
     ap.add_argument("--eye-mode", choices=sorted(EYE_MODES), default=None)
     ap.add_argument("--mouth-mode", choices=sorted(MOUTH_MODES), default=None)
     ap.add_argument("--tolerance", type=float, default=1.0, help="event matching tolerance (s)")
     ap.add_argument("--tag", default=None, help="name of this run (output sub-folder)")
     ap.add_argument("--out", default="results/study_eval")
     args = ap.parse_args()
-    if (args.eye_mode or args.mouth_mode or args.config) and not args.replay:
-        print("Note: --config / --eye-mode / --mouth-mode only take effect with --replay; adding --replay.")
-        args.replay = True
+    replay = args.replay or args.compare or bool(args.config or args.eye_mode or args.mouth_mode)
 
     manifest = Path(args.manifest)
     rows = load_manifest(manifest, Path(args.sessions))
@@ -199,59 +165,52 @@ def main() -> int:
     if missing:
         raise SystemExit("Missing files (run process_videos.py / check the label paths):\n  " + "\n  ".join(missing))
 
-    cfg = apply_evidence_modes(load_config(args.config), args.eye_mode, args.mouth_mode) if args.replay else None
-    reports = []
-    for n, r in enumerate(rows, 1):
-        print(f"[{n}/{len(rows)}] {r['participant']} {r['session'].name} ({r['split']}, {r['condition']})")
-        rep = evaluate_session(r["session"], str(r["labels"]), args.tolerance, cfg)
-        reports.append(rep)
-
-    groups: Dict[str, List[int]] = defaultdict(list)
-    for i, r in enumerate(rows):
-        groups[f"{r['split']} - all sessions"].append(i)
-        groups[f"{r['split']} - {r['condition']}"].append(i)
-    if args.split == "all":
-        groups = {"all splits": list(range(len(rows))), **groups}
-    # drop the per-condition group when there is only one condition (it equals the "all sessions" group)
-    conditions = {r["condition"] for r in rows}
-    if len(conditions) == 1:
-        groups = {k: v for k, v in groups.items() if not k.endswith(f" - {next(iter(conditions))}")}
-    summary = {name: pooled([reports[i] for i in idx], [rows[i]["participant"] for i in idx]) for name, idx in groups.items()}
-
-    tag = args.tag or (f"{args.split}_replay" if args.replay else args.split)
-    out = Path(args.out) / tag
-    out.mkdir(parents=True, exist_ok=True)
+    cfg = apply_evidence_modes(load_config(args.config), args.eye_mode, args.mouth_mode) if replay else None
+    variants = {"as_recorded": None, "replay": cfg} if args.compare else {("replay" if replay else "as_recorded"): cfg}
+    tag = args.tag or (f"{args.split}_{'compare' if args.compare else ('replay' if replay else 'recorded')}")
     meta = {"tag": tag, "split": args.split, "sessions": len(rows), "participants": len({r["participant"] for r in rows}),
-            "replay": args.replay, "config": args.config, "eye_mode": args.eye_mode, "mouth_mode": args.mouth_mode,
+            "replay": replay, "config": args.config, "eye_mode": args.eye_mode, "mouth_mode": args.mouth_mode,
             "tolerance_s": args.tolerance}
 
-    with open(out / "per_session.csv", "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(["participant", "session", "split", "condition", "minutes", "behavior", "gt_events", "event_tp", "event_fp",
-                    "event_fn", "event_f1", "frame_f1", "median_delay_s", "unnecessary_alarms"])
-        for r, rep in zip(rows, reports):
-            for b in BEHAVIORS:
-                ev, fr = rep["behaviors"][b]["event"], rep["behaviors"][b]["frame"]
-                w.writerow([r["participant"], r["session"].name, r["split"], r["condition"], rep["duration_min"], b, ev["gt_events"],
-                            ev["tp"], ev["fp"], ev["fn"], ev["f1"], fr["f1"], ev["median_delay_s"], rep["alarms"]["unnecessary"]])
-    with open(out / "summary.csv", "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        keys = list(next(iter(summary.values()))[BEHAVIORS[0]].keys())
-        w.writerow(["group", "behavior"] + keys)
-        for name, g in summary.items():
-            for b in BEHAVIORS:
-                w.writerow([name, b] + [g[b][k] for k in keys])
-            a = g["alarms"]
-            w.writerow([name, "unnecessary_alarms_per_hour", a["unnecessary_per_hour"]])
-    md = markdown(summary, meta)
-    (out / "summary.md").write_text(md, encoding="utf-8")
-    (out / "report.json").write_text(json.dumps({"meta": meta, "summary": summary,
-                                                 "sessions": [{**{k: str(v) for k, v in r.items()}, "report": rep}
-                                                              for r, rep in zip(rows, reports)]}, indent=2), encoding="utf-8")
+    all_md, all_summary, all_reports = [], {}, {}
+    for variant, vcfg in variants.items():
+        reports = []
+        for n, r in enumerate(rows, 1):
+            frames = load_jsonl(r["session"] / "frames.jsonl")
+            try:
+                labels = load_labels(r["labels"], duration_s=float(frames[-1]["t"]))
+            except ValueError as exc:
+                raise SystemExit(str(exc))
+            for w in labels.warnings:
+                print(f"   label warning ({r['labels'].name}): {w}")
+            print(f"[{variant} {n}/{len(rows)}] {r['participant']} {r['session'].name} ({r['split']}, {r['condition']})")
+            reports.append(evaluate_session(r["session"], labels, args.tolerance, vcfg))
+        groups = group_indices(rows, args.split)
+        summary = {name: pool([reports[i] for i in idx], [rows[i]["participant"] for i in idx]) for name, idx in groups.items()}
+        title = {"as_recorded": "As recorded (baseline: the version that recorded the sessions)",
+                 "replay": "This version (Stages 3-5 replayed on the logged features)"}[variant]
+        meta_line = (f"Split **{args.split}**, {meta['sessions']} sessions, {meta['participants']} participants"
+                     + (f", config {args.config}" if args.config and variant == "replay" else "")
+                     + (f", eye mode {args.eye_mode}" if args.eye_mode and variant == "replay" else "")
+                     + (f", mouth mode {args.mouth_mode}" if args.mouth_mode and variant == "replay" else "") + ".")
+        all_md.append(markdown(summary, f"Participant study - {title}", meta_line))
+        all_summary[variant], all_reports[variant] = summary, reports
+
+    out = Path(args.out) / tag
+    md = "\n".join(all_md)
+    if args.compare:
+        md += "\n# Change (this version - baseline), primary F1 per group\n\n| Group | Behaviour | Baseline | This version |\n|---|---|---|---|\n"
+        for name, g in all_summary["replay"].items():
+            for b in FLAG_OF:
+                if b in g and b in all_summary["as_recorded"].get(name, {}):
+                    md += f"| {name} | {b} | {all_summary['as_recorded'][name][b]['primary_f1']:.2f} | {g[b]['primary_f1']:.2f} |\n"
+    for variant in variants:
+        sub = out if len(variants) == 1 else out / variant
+        write_outputs(sub, rows, all_reports[variant], all_summary[variant], md, {**meta, "variant": variant})
     print("\n" + md)
-    print(f"Saved to {out}/ (per_session.csv, summary.csv, summary.md, report.json)")
+    print(f"Saved to {out}/")
     if args.split == "test":
-        print("Reminder: report the test split only with the final config; tune on the validation split.")
+        print("Reminder: report the test split only with the frozen config; tune on the validation split.")
     return 0
 
 

@@ -39,7 +39,9 @@ SCENARIOS = {
     "phone_2.5s": ("Phone visible 2.5 s", lambda b: b.phone(2.5).alert(8), {}),
     "phone_4s": ("Phone use 4 s", lambda b: b.phone(4).alert(8), {}),
     "phone_4s_stopped": ("Phone use 4 s, vehicle stopped", lambda b: b.phone(4).alert(8), {"speed_kmh": 0.0}),
-    "face_lost_4s": ("Face lost 4 s (head turned far)", lambda b: b.face_lost(4).alert(8), {}),
+    "face_lost_4s": ("Head turned far, face lost 4 s", lambda b: b.turn_away_and_lose_face(4).alert(8), {}),
+    "camera_covered_4s": ("Camera covered 4 s (facing forward)", lambda b: b.face_lost(4).alert(8), {}),
+    "away_twice_6s": ("Looking away 6 s, twice (alert must stop)", lambda b: b.look_away(6).alert(2).look_away(6).alert(30), {}),
     "harsh_brake": ("Harsh braking 0.5 g, alert driver", lambda b: b.alert(15), {"motion_at": (CAL, CAL + 1.0, 0.5)}),
 }
 
@@ -60,8 +62,9 @@ def main() -> int:
         build(b)
         frames = b.build()
         out = run_scenario(frames, cfg, **kw)
-        alarms = [f"{a.t - CAL:+.1f}s:{a.tier}{'+push' if a.push else ''}" for o in out for a in o.alerts]
-        shown = ", ".join(alarms[:5]) + (f" ... ({len(alarms)} total)" if len(alarms) > 5 else "")
+        alarms = [f"{a.t - CAL:+.1f}s:{a.event} {a.tier}{'+push' if a.push else ''}" for o in out for a in o.alerts
+                  if a.event in ("start", "escalate", "deescalate", "stop", "push")]
+        shown = ", ".join(alarms[:6]) + (f" ... ({len(alarms)} total)" if len(alarms) > 6 else "")
         print(f"{label:38s} {max_tier(out, CAL, frames):8s}  {shown or '-'}")
         if args.plot:
             plot_timeline(frames, out, label, args.plot)

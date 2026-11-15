@@ -90,15 +90,23 @@ def test_drowsy_and_yawning_together_raise_the_risk():
     assert _assess(d=drowsy).tier == "MEDIUM"
     combined = _assess(d=drowsy, y=single_yawn)
     assert combined.tier == "HIGH"
-    assert combined.fatigue_level.startswith("Level 3")
+    assert combined.fatigue_level == "Severe"
     # moderate drowsiness + one yawn: each alone is LOW, together MEDIUM
     assert _assess(d=0.45).tier == "LOW"
     assert _assess(d=0.45, y=single_yawn).tier == "MEDIUM"
 
 
-def test_drowsiness_levels_reported():
-    assert _assess().fatigue_level == "Alert"
-    assert _assess(y=0.4).fatigue_level.startswith("Level 1")
-    assert _assess(d=0.7).fatigue_level.startswith("Level 2")
-    assert _assess(d=0.7, hours=2.5).fatigue_level.startswith("Level 3")  # long drive escalates
+def test_fatigue_levels_reported():
+    assert _assess().fatigue_level == "Low"
+    assert _assess(y=0.4).fatigue_level == "Moderate"
+    assert _assess(d=0.7).fatigue_level == "High"
+    assert _assess(d=0.7, hours=2.5).fatigue_level == "Severe"  # long drive escalates
+
+
+def test_risk_tier_hysteresis():
+    from dms.risk.driver_risk import TierTracker
+
+    tr = TierTracker([25.0, 52.5, 77.5], margin=5.0)
+    assert [tr.update(r) for r in (30, 24, 21, 19, 53, 50, 48, 46, 80, 10)] == \
+        ["LOW", "LOW", "LOW", "NONE", "MEDIUM", "MEDIUM", "MEDIUM", "LOW", "HIGH", "NONE"]
     assert _assess(d=0.7, hours=2.5).tier == "HIGH"

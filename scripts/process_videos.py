@@ -1,6 +1,7 @@
 """Run the detection model on every recorded participant video in a folder.
 
     python scripts/process_videos.py --videos data/study/videos --yolo models/driver_state_best.pt
+    python scripts/process_videos.py --videos data/study/videos --yolo models/driver_state_best.pt --fusion models/fusion_model.json
 
 Each video becomes one session folder results/study_sessions/<video name>/
 (frames.jsonl, alerts.jsonl, summary.json), the input evaluate_study.py needs.
@@ -39,6 +40,8 @@ def main() -> int:
     ap.add_argument("--log-dir", default="results/study_sessions", help="where the session folders are written")
     ap.add_argument("--yolo", default=None, help="YOLO weights (the trained driver-state model)")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--fusion", default=None, help="fusion model (train_fusion.py); its outputs are logged, so "
+                    "evaluate_study.py --eye-mode rules / fused can compare without and with it")
     ap.add_argument("--overwrite", action="store_true", help="re-process videos that already have a session")
     ap.add_argument("--save-video", action="store_true", help="also write an annotated copy next to each session")
     args = ap.parse_args(argv)
@@ -64,6 +67,8 @@ def main() -> int:
             cmd += ["--yolo", args.yolo]
         if args.config:
             cmd += ["--config", args.config]
+        if args.fusion:
+            cmd += ["--fusion", args.fusion]
         if args.save_video:
             cmd += ["--save-video", str(session / f"{video.stem}_annotated.mp4")]
         cmd += passthrough

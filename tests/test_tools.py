@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from benchmark_yolo import average_precision, iou_matrix, match, prf
-from evaluate_behaviors import episodes, score
+from dms.evaluation.metrics import episodes, event_metrics, frame_metrics, truth_mask
 
 
 def test_iou():
@@ -35,24 +35,18 @@ def test_behaviour_scoring_frame_and_event_level():
     t = np.arange(0, 20, 0.1)
     pred = (t >= 12.0) & (t <= 15.0)  # detected 2 s after onset (persistence rule)
     gt = [(10.0, 15.0)]
-    r = score(t, pred, gt, tol=1.0)
-    assert r["event"]["f1"] == pytest.approx(1.0)
-    assert r["event"]["median_delay_s"] == pytest.approx(2.0)
-    assert r["frame"]["precision"] == pytest.approx(1.0)
-    assert r["frame"]["recall"] == pytest.approx(31 / 51, abs=0.02)
+    ev = event_metrics(episodes(t, pred), gt, tol=1.0)
+    fr = frame_metrics(pred, truth_mask(t, gt))
+    assert ev["f1"] == pytest.approx(1.0)
+    assert ev["median_delay_s"] == pytest.approx(2.0)
+    assert fr["precision"] == pytest.approx(1.0)
+    assert fr["recall"] == pytest.approx(31 / 51, abs=0.02)
 
 
 def test_false_positive_event():
     t = np.arange(0, 30, 0.1)
     pred = ((t >= 2) & (t <= 4)) | ((t >= 20) & (t <= 22))
-    r = score(t, pred, [(1.0, 5.0)], tol=0.5)
-    assert r["event"]["pred_events"] == 2
-    assert r["event"]["precision"] == pytest.approx(0.5)
-    assert r["event"]["recall"] == pytest.approx(1.0)
-
-
-def test_episodes_merge_small_gaps():
-    t = np.arange(0, 5, 0.1)
-    on = np.ones_like(t, dtype=bool)
-    on[20:23] = False  # 0.3 s gap -> merged
-    assert len(episodes(t, on, merge_gap=0.5)) == 1
+    ev = event_metrics(episodes(t, pred), [(1.0, 5.0)], tol=0.5)
+    assert ev["pred_events"] == 2
+    assert ev["precision"] == pytest.approx(0.5)
+    assert ev["recall"] == pytest.approx(1.0)
