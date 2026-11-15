@@ -13,7 +13,8 @@ face:                                # MediaPipe Face Landmarker (detector + mes
 detector:                            # YOLO detector: YOLOv8 / YOLO11 / YOLO26 are interchangeable here
   model_path: models/yolov8n.pt      # COCO baseline (phones only); use your trained driver-state model (phones + eyes + yawns)
   imgsz: 640
-  conf: 0.35
+  conf: 0.35                         # boxes count from this confidence (a phone episode starts here)
+  phone_stay_conf: 0.2               # an ongoing phone episode continues down to this confidence
   iou: 0.5
   device: cpu
   every_n_frames: 1                  # run YOLO every N frames (reuse boxes in between) to save compute
@@ -33,15 +34,20 @@ eye_model:                           # optional learned eye-state classifier (YO
   grayscale: true
   imgsz: null
 
+fusion:                              # optional picture-based fusion model (scripts/train_fusion.py); null = off
+  model_path: null
+
 # ---------------------------------------------------------------- Stage 3: threshold classification
 evidence:                            # fusion weights (0 disables a source -> ablation studies)
   eye_ear: 0.5                       # geometric Eye Aspect Ratio
   eye_blendshape: 0.5                # learned eyeBlink blendshape
   eye_cnn: 0.5                       # learned eye-state classifier (only if eye_model is set)
   eye_yolo: 0.5                      # YOLO driver-state detector: eye_open / eye_closed boxes
+  eye_fusion: 0.5                    # fusion model P(eyes closed) (only if fusion.model_path is set)
   mouth_mar: 0.5                     # geometric Mouth Aspect Ratio
   mouth_blendshape: 0.5              # learned jawOpen blendshape
   mouth_yolo: 0.5                    # YOLO driver-state detector: yawn boxes
+  mouth_fusion: 0.5                  # fusion model P(yawning) (only if fusion.model_path is set)
 
 thresholds:                          # relative to the driver's calibrated baseline
   ear_closed_ratio: 0.70             # closed when EAR < 0.70 x baseline EAR
@@ -62,6 +68,7 @@ calibration:
   min_ear: 0.18
   max_mar: 0.25
   max_blink: 0.5
+  max_camera_offset_deg: 25.0        # baseline head pose further off-axis -> warning (eye geometry unreliable)
   adapt: true                        # online baseline tracking while the driver is confidently alert
   adapt_tau_s: 120.0
   adapt_quiet_s: 10.0
@@ -78,9 +85,7 @@ temporal:                            # persistence rules, in seconds (frame-rate
   gaze_min_s: 2.0                    # shorter glances are mirror checks
   gaze_gap_s: 0.3
   phone_confirm_s: 3.0               # Section 1.7.15
-  phone_gap_s: 0.5
-  perclos_window_s: 60.0
-  perclos_min_coverage_s: 30.0                # PERCLOS needs half a window of data
+  phone_gap_s: 1.0                   # S01: phones were detected in ~50-80 % of frames; 0.5 s split real use
   offroad_window_s: 30.0
   yawn_window_s: 300.0
   closure_hold_s: 3.0
@@ -92,9 +97,32 @@ temporal:                            # persistence rules, in seconds (frame-rate
   yawn_eye_guard_level: 0.3          # ... nor while the mouth is opening for a yawn (eyes squint)
   yawn_eye_guard_s: 0.5              # ... nor for 0.5 s after it closes
 
+quality:                             # unknown is never treated as "eyes closed" or "looking away"
+  max_frame_gap_s: 1.0               # a longer pause between frames (camera stall) ends every episode
+  min_eye_width_px: 12.0             # smaller eyes in the image -> eye state not judged
+  face_loss_turning_evidence: 0.3    # a lost face counts as "head turned away" only if the head was turning ...
+  face_loss_lookback_s: 0.5          # ... within this time before it was lost
+  look_down_ear_guard: 1.0           # eyeLookDown >= this drops EAR from the eye evidence (1.0 = off; validate first)
+
+drowsiness:                          # drowsiness STATE (Table 1.11): alert / slightly / moderately drowsy
+  window_s: 60.0                     # look-back for PERCLOS, long closures, longest closure
+  perclos_min_coverage_s: 30.0
+  slight_perclos: 0.08               # PERCLOS >= 8 %  -> slightly drowsy
+  moderate_perclos: 0.15             # PERCLOS >= 15 % -> moderately drowsy
+  slight_closure_s: 0.8              # a closure this long in the window -> slightly drowsy
+  moderate_closure_s: 1.5            # microsleep -> moderately drowsy
+  slight_long_closures: 2            # closures >= temporal.closure_event_s ("slow blinks") in the window
+  moderate_long_closures: 4
+  slight_yawns: 2                    # yawns in temporal.yawn_window_s ("frequent yawning") -> slightly drowsy ...
+  yawn_hold_s: 60.0                  # ... while the last yawn is at most this old (frequent AND current)
+  moderate_yawns: 0                  # 0 = yawning alone never makes "moderately drowsy"
+  yawns_plus_eyes_moderate: true     # frequent yawning AND a slight eye sign -> moderately drowsy
+  blink_rate_slight_per_min: 0.0     # 0 = off (frequent blinking; needs validation data)
+  recovery_s: 20.0                   # no new eye sign this long -> step down one level, eye windows restart
+  state_scores: [0.0, 0.45, 0.75]    # eye level alert / slightly / moderately -> drowsiness severity for the risk model
+
 # ---------------------------------------------------------------- Stage 4: severity anchors [[x, score], ...]
 severity:                            # 0.34 = MODERATE starts, 0.66 = SEVERE starts (fuzzy crossovers)
-  perclos:       [[0.0, 0.0], [0.04, 0.0], [0.08, 0.34], [0.15, 0.66], [0.25, 1.0]]
   closure_s:     [[0.0, 0.0], [0.4, 0.0], [0.8, 0.34], [1.5, 0.66], [2.0, 0.9], [3.0, 1.0]]
   yawn_count:    [[0.0, 0.0], [1.0, 0.4], [2.0, 0.5], [3.0, 0.7], [4.0, 0.9]]
   gaze_s:        [[0.0, 0.0], [1.0, 0.0], [2.0, 0.34], [3.0, 0.66], [4.0, 0.9], [5.0, 1.0]]
@@ -106,17 +134,29 @@ context:
   speed_kmh:     [[0.0, 0.0], [5.0, 0.1], [10.0, 0.34], [20.0, 0.5], [60.0, 0.5], [80.0, 0.66], [100.0, 0.9], [120.0, 1.0]]
   motion_g:      [[0.0, 0.0], [0.1, 0.0], [0.25, 0.34], [0.45, 0.66], [0.6, 1.0]]
   driving_hours: [[0.0, 0.0], [1.0, 0.34], [2.0, 0.66], [3.0, 1.0]]
-  assumed_speed_kmh: 40.0            # used when GPS speed is missing (never suppresses alerts)
+  assumed_speed_kmh: 40.0            # used when GPS speed is missing (never suppresses alerts; flagged in the log)
+  gps_stale_s: 3.0                   # a fix older than this is not used
+  moving_speed_kmh: 5.0              # below this the vehicle is stopped (driving clock pauses)
+  break_reset_s: 900.0               # a 15-min stop resets the continuous driving duration
+  sudden_motion_score: 0.65          # motion score at which "sudden motion" counts as an ongoing event
 
 risk:
   tier_bounds: [25.0, 52.5, 77.5]    # R >= 25 LOW, >= 52.5 MEDIUM, >= 77.5 HIGH
+  tier_hysteresis: 5.0               # a tier is left only when R falls 5 points below its bound
   resolution: 201
 
-alerts:
-  release_s: 3.0
-  min_interval_s: 5.0
-  medium_repeat_s: 2.0
-  medium_max_repeats: 5
-  high_repeat_s: 1.0
-  high_max_repeats: 0
-  push_interval_s: 60.0
+alerts:                              # alert state machine (dms/alerts/state_machine.py)
+  activate_s: 0.3                    # risk tier must hold this long before an alert starts
+  clear_s: 2.0                       # driver back to normal this long -> STOP (even if the risk is still elevated)
+  min_alert_s: 2.0                   # an alert lasts at least this long
+  release_s: 3.0                     # risk tier lower this long -> the alert steps down a tier
+  min_interval_s: 5.0                # minimum gap between LOW soft beeps
+  medium_repeat_s: 2.0               # repeating buzzer period
+  medium_max_repeats: 3              # MEDIUM burst when no behaviour keeps it going
+  high_repeat_s: 1.0                 # repeated alarm period
+  high_max_repeats: 0                # HIGH burst when no behaviour keeps it going (0 = none)
+  push_interval_s: 60.0              # at most one push per minute; one per HIGH alert
+  reminder_s: 0.0                    # >0: re-alert while risk stays >= MEDIUM without events (0 = off)
+  escalate_closure_s: 0.0            # >0: eyes closed this long during an alert -> HIGH + push (0 = off)
+  keepalive_s: 1.0                   # re-send the buzzer mode while sounding (device fail-safe)
+  camera_timeout_s: 3.0              # no frame this long -> "monitoring unavailable", alert stops
