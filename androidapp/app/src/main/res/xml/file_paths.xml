@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<paths>
-    <!-- Session log zips are written to cacheDir before sharing -->
-    <cache-path name="shared" path="." />
-</paths>
