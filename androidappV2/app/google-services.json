@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "482672676191",
+    "project_id": "esca-3-2526-c3-testing",
+    "storage_bucket": "esca-3-2526-c3-testing.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:482672676191:android:2240341cad4d48b2e73aea",
+        "android_client_info": {
+          "package_name": "edu.dlsu.esca_3_2526_c3"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDIBxTmL-m3hNi_yhYIxh8J_iFdqT-T68g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
