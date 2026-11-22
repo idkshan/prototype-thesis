@@ -1,0 +1,375 @@
+{
+ "face": {
+  "min_detection_confidence": 0.5,
+  "min_presence_confidence": 0.5,
+  "min_tracking_confidence": 0.5
+ },
+ "detector": {
+  "imgsz": 640,
+  "conf": 0.35,
+  "phone_stay_conf": 0.2,
+  "iou": 0.5,
+  "every_n_frames": 1,
+  "phone_class_names": [
+   "cell phone",
+   "phone",
+   "mobile phone",
+   "cellphone",
+   "mobile_phone"
+  ],
+  "eye_open_class_names": [
+   "eye_open",
+   "open_eye",
+   "open",
+   "eyes_open"
+  ],
+  "eye_closed_class_names": [
+   "eye_closed",
+   "closed_eye",
+   "closed",
+   "eyes_closed"
+  ],
+  "yawn_class_names": [
+   "yawn",
+   "yawning"
+  ],
+  "no_yawn_class_names": [
+   "no_yawn",
+   "mouth_closed",
+   "not_yawning"
+  ],
+  "face_part_margin": 0.15,
+  "roi_width_factor": 2.5,
+  "roi_above_factor": 0.5
+ },
+ "eye_model": {
+  "closed_class_names": [
+   "closed",
+   "close",
+   "closed_eye",
+   "closed_eyes"
+  ],
+  "crop_scale": 1.8,
+  "grayscale": true
+ },
+ "evidence": {
+  "eye_ear": 0.5,
+  "eye_blendshape": 0.5,
+  "eye_cnn": 0.5,
+  "eye_yolo": 0.5,
+  "eye_fusion": 0.5,
+  "mouth_mar": 0.5,
+  "mouth_blendshape": 0.5,
+  "mouth_yolo": 0.5,
+  "mouth_fusion": 0.5
+ },
+ "thresholds": {
+  "ear_closed_ratio": 0.7,
+  "blink_closed_delta": 0.35,
+  "mar_open_delta": 0.4,
+  "jaw_open_delta": 0.35,
+  "yaw_deg": 30.0,
+  "pitch_down_deg": 20.0,
+  "pitch_up_deg": 25.0,
+  "decision_level": 0.5,
+  "uncalibrated_pose_scale": 1.5
+ },
+ "calibration": {
+  "enabled": true,
+  "duration_s": 5.0,
+  "min_samples": 20,
+  "max_pose_std_deg": 5.0,
+  "min_ear": 0.18,
+  "max_mar": 0.25,
+  "max_blink": 0.5,
+  "max_camera_offset_deg": 60.0,
+  "adapt": true,
+  "adapt_tau_s": 120.0,
+  "adapt_quiet_s": 10.0,
+  "max_ear_drift": 0.2,
+  "max_mar_drift": 0.1,
+  "max_pose_drift_deg": 10.0,
+  "defaults": {
+   "ear": 0.28,
+   "mar": 0.05,
+   "yaw": 0.0,
+   "pitch": 0.0,
+   "blink": 0.15,
+   "jaw": 0.03
+  }
+ },
+ "temporal": {
+  "closure_gap_s": 0.15,
+  "closure_event_s": 0.5,
+  "yawn_min_s": 1.5,
+  "yawn_gap_s": 0.3,
+  "gaze_min_s": 2.0,
+  "gaze_gap_s": 0.3,
+  "phone_confirm_s": 3.0,
+  "phone_gap_s": 1.0,
+  "offroad_window_s": 30.0,
+  "yawn_window_s": 300.0,
+  "closure_hold_s": 3.0,
+  "gaze_hold_s": 1.0,
+  "phone_hold_s": 1.0,
+  "face_loss_as_gaze_away": true,
+  "face_loss_max_s": 10.0,
+  "suspend_eyes_when_phone": true,
+  "yawn_eye_guard_level": 0.3,
+  "yawn_eye_guard_s": 0.5
+ },
+ "quality": {
+  "max_frame_gap_s": 1.0,
+  "min_eye_width_px": 12.0,
+  "face_loss_turning_evidence": 0.3,
+  "face_loss_lookback_s": 0.5,
+  "look_down_ear_guard": 1.0
+ },
+ "drowsiness": {
+  "window_s": 60.0,
+  "perclos_min_coverage_s": 30.0,
+  "slight_perclos": 0.08,
+  "moderate_perclos": 0.15,
+  "slight_closure_s": 0.8,
+  "moderate_closure_s": 1.5,
+  "slight_long_closures": 2,
+  "moderate_long_closures": 4,
+  "slight_yawns": 2,
+  "yawn_hold_s": 60.0,
+  "moderate_yawns": 0,
+  "yawns_plus_eyes_moderate": true,
+  "blink_rate_slight_per_min": 0.0,
+  "recovery_s": 20.0,
+  "state_scores": [
+   0.0,
+   0.45,
+   0.75
+  ]
+ },
+ "severity": {
+  "closure_s": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    0.4,
+    0.0
+   ],
+   [
+    0.8,
+    0.34
+   ],
+   [
+    1.5,
+    0.66
+   ],
+   [
+    2.0,
+    0.9
+   ],
+   [
+    3.0,
+    1.0
+   ]
+  ],
+  "yawn_count": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    1.0,
+    0.4
+   ],
+   [
+    2.0,
+    0.5
+   ],
+   [
+    3.0,
+    0.7
+   ],
+   [
+    4.0,
+    0.9
+   ]
+  ],
+  "gaze_s": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    1.0,
+    0.0
+   ],
+   [
+    2.0,
+    0.34
+   ],
+   [
+    3.0,
+    0.66
+   ],
+   [
+    4.0,
+    0.9
+   ],
+   [
+    5.0,
+    1.0
+   ]
+  ],
+  "offroad_ratio": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    0.1,
+    0.0
+   ],
+   [
+    0.25,
+    0.34
+   ],
+   [
+    0.4,
+    0.66
+   ],
+   [
+    0.6,
+    1.0
+   ]
+  ],
+  "phone_s": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    1.0,
+    0.0
+   ],
+   [
+    2.99,
+    0.3
+   ],
+   [
+    3.0,
+    0.7
+   ],
+   [
+    5.0,
+    1.0
+   ]
+  ]
+ },
+ "context": {
+  "speed_kmh": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    5.0,
+    0.1
+   ],
+   [
+    10.0,
+    0.34
+   ],
+   [
+    20.0,
+    0.5
+   ],
+   [
+    60.0,
+    0.5
+   ],
+   [
+    80.0,
+    0.66
+   ],
+   [
+    100.0,
+    0.9
+   ],
+   [
+    120.0,
+    1.0
+   ]
+  ],
+  "motion_g": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    0.1,
+    0.0
+   ],
+   [
+    0.25,
+    0.34
+   ],
+   [
+    0.45,
+    0.66
+   ],
+   [
+    0.6,
+    1.0
+   ]
+  ],
+  "driving_hours": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    1.0,
+    0.34
+   ],
+   [
+    2.0,
+    0.66
+   ],
+   [
+    3.0,
+    1.0
+   ]
+  ],
+  "assumed_speed_kmh": 40.0,
+  "gps_stale_s": 3.0,
+  "moving_speed_kmh": 5.0,
+  "break_reset_s": 900.0,
+  "sudden_motion_score": 0.65
+ },
+ "risk": {
+  "tier_bounds": [
+   25.0,
+   52.5,
+   77.5
+  ],
+  "tier_hysteresis": 5.0,
+  "resolution": 201
+ },
+ "alerts": {
+  "activate_s": 0.3,
+  "clear_s": 2.0,
+  "min_alert_s": 2.0,
+  "release_s": 3.0,
+  "min_interval_s": 5.0,
+  "medium_repeat_s": 2.0,
+  "medium_max_repeats": 3,
+  "high_repeat_s": 1.0,
+  "high_max_repeats": 0,
+  "push_interval_s": 60.0,
+  "reminder_s": 0.0,
+  "escalate_closure_s": 0.0,
+  "keepalive_s": 1.0,
+  "camera_timeout_s": 3.0
+ }
+}
