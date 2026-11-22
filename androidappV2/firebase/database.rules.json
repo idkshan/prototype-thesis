@@ -1,0 +1,35 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "roles": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "drivers": {
+      ".read": "auth != null && root.child('roles').child(auth.uid).val() === 'supervisor'",
+      "$driverId": {
+        ".read": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'",
+        ".write": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'"
+      }
+    },
+    "alerts": {
+      ".read": "auth != null && root.child('roles').child(auth.uid).val() === 'supervisor'",
+      "$driverId": {
+        ".read": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'",
+        ".write": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'",
+        ".indexOn": [
+          "timestampMs"
+        ]
+      }
+    },
+    "supervisorTokens": {
+      "$uid": {
+        ".read": false,
+        ".write": "auth != null && auth.uid === $uid && root.child('roles').child(auth.uid).val() === 'supervisor'"
+      }
+    }
+  }
+}
